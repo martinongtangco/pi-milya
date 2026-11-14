@@ -438,7 +438,6 @@ struct GuiApp {
     rt: tokio::runtime::Handle,
     #[allow(dead_code)] // keeps the runtime alive for the app's whole life
     rt_keep: Option<tokio::runtime::Runtime>,
-    last_hash: u64,
 }
 
 impl GuiApp {
@@ -477,7 +476,6 @@ impl GuiApp {
             rec_tx,
             rt: rt.handle().clone(),
             rt_keep: Some(rt),
-            last_hash: 0,
         };
         let rt2 = app.rt.clone();
         rt2.block_on(app.start_inner());
@@ -781,8 +779,12 @@ impl eframe::App for GuiApp {
             self.draw_main(ctx, active_streaming);
         }
 
-        if any_running || changed {
-            ctx.request_repaint();
+        // Throttled repaint: at most ~20fps, whether or not content changed.
+        // Records arriving between ticks are batched into the next repaint
+        // (drain_records pulls everything that is ready), so streaming stays
+        // smooth without a 60fps full re-layout of the whole window.
+        if changed || any_running {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
     }
 
@@ -1069,7 +1071,6 @@ impl GuiApp {
             });
             return;
         }
-        let hash = hash_items(&self.members[self.active].items);
         let mname = self.members[self.active].member.name.clone();
         let mcolor = theme::member_color(&mname);
         let minitial = initial_of(&mname);
@@ -1257,7 +1258,6 @@ impl GuiApp {
                     ui.add_space(14.0);
                 }
             });
-        self.last_hash = hash;
     }
 
     fn draw_wizard(&mut self, ctx: &egui::Context) {
