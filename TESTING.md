@@ -132,10 +132,11 @@ shut down via stdin close).
   without `-m`); smoke prints `model: default` in that case.
 - `/dev/urandom` must be read with fixed-size `read_exact` (a blocking
   `fs::read` hangs forever) — the uuid fallback in `pi_client.rs` does.
-- Unconfirmed (Windows, one 1536x960 session): the bottom input bar and
-  top header buttons were clipped while the chat area extended to the
-  window bottom; 2560x1440 rendered correctly. If reproducible, resize /
-  maximize the window — likely an egui/winit viewport quirk at that
-  resolution, not a code path (same build, same code).
+- Non-repro (Windows, 1536x960): one session on the pre-redesign build had the
+  bottom input bar and top header buttons clipped; the 4bce9f7 re-verify
+  renders cleanly at 1536x960. If it ever recurs, resize/maximize the
+  window — likely an egui/winit viewport quirk, not a code path. (Same
+  laptop: desktop display flips 1536x960 ↔ 2560x1440 mid-session and can
+  kill synthetic mouse injection — an environment quirk, not the app.)
 - `plywoodsheetcalculator` (unrelated repo) still has `node_modules/`
   committed if you ever wonder about that finding.

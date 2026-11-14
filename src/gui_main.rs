@@ -1,4 +1,4 @@
-//! pi-milya GUI (egui spike): the pamilya as a real window.
+//! pi-milya GUI (egui spike): the family as a real window.
 //!
 //! Reuses the terminal-agnostic core (family, pi_client, protocol, config).
 //! All members' conversations coexist — streams keep flowing in the
@@ -902,7 +902,7 @@ impl GuiApp {
         ui.add_space(10.0);
         ui.horizontal(|ui| {
             ui.add_space(8.0);
-            ui.label(RichText::new("pamilya").strong().size(13.0));
+            ui.label(RichText::new("family").strong().size(13.0));
         });
         ui.add_space(12.0);
         for i in 0..self.members.len() {
