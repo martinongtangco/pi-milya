@@ -770,7 +770,12 @@ impl eframe::App for GuiApp {
         // fits inside the window — even when the reported viewport is smaller
         // than the window (high-DPI Windows displays), so the input bar can
         // never float above a black band. Clamped to [1.0, 2.0].
-        let size = ctx.input(|i| i.screen_rect.size());
+        //
+        // IMPORTANT: `screen_rect` is in points (physical / pixels_per_point),
+        // so multiply by the *current* pixels_per_point to recover the physical
+        // size. Feeding `screen_rect` alone back into set_pixels_per_point
+        // oscillates (1.0 <-> target) and redraws every frame = flicker.
+        let size = ctx.input(|i| i.screen_rect.size() * ctx.pixels_per_point());
         let scale = (size.y / 900.0).min(size.x / 1560.0).clamp(1.0, 2.0);
         if (ctx.pixels_per_point() - scale).abs() > 0.01 {
             ctx.set_pixels_per_point(scale);
