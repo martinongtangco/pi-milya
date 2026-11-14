@@ -422,6 +422,7 @@ struct WizForm {
     thinking: String,
     face: String,
     prompt: String,
+    save_err: String,
 }
 
 struct GuiApp {
@@ -578,6 +579,7 @@ impl GuiApp {
             thinking: "medium".into(),
             face: FACE_PRESETS[0].1.join("\n"),
             prompt: String::new(),
+            save_err: String::new(),
         };
         if let Some(idx) = editing_idx {
             if let Some(m) = self.members.get(idx) {
@@ -1355,9 +1357,17 @@ impl GuiApp {
                     .desired_rows(4),
             );
             ui.add_space(16.0);
+            if !w.save_err.is_empty() {
+                ui.label(RichText::new(&w.save_err).color(theme::ERR));
+                ui.add_space(6.0);
+            }
             ui.horizontal(|ui| {
                 if ui.add(egui::Button::new("save member")).clicked() {
-                    saved = true;
+                    if w.model.as_deref().unwrap_or("").trim().is_empty() {
+                        w.save_err = "choose a model first — pi cannot start without one".to_string();
+                    } else {
+                        saved = true;
+                    }
                 }
                 if ui.add(egui::Button::new("cancel")).clicked() {
                     cancelled = true;
@@ -1367,7 +1377,7 @@ impl GuiApp {
         if saved {
             self.apply_wizard(w);
         } else if cancelled && !(w.is_new && self.members.is_empty()) {
-            self.wizard = Some(w);
+            self.wizard = None;
         } else {
             self.wizard = Some(w);
         }

@@ -2,6 +2,7 @@
 name = "pi-milya"
 version = "0.1.0"
 edition = "2024"
+default-run = "pi-milya"
 
 [lib]
 name = "pi_milya"

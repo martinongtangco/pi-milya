@@ -13,8 +13,12 @@ cargo build --release
 Zero warnings expected. `--smoke` is the TUI's non-UI end-to-end check:
 
 ```sh
-cargo run -- --smoke        # spawn pi, get_state, prompt "ok", expect reply
+cargo run -- --smoke        # default-run is pi-milya; explicit form:
+ cargo run --bin pi-milya -- --smoke --pi /path/to/pi
 ```
+
+(`--smoke` prints `model: default` when pi has no explicit model set in
+`--no-session` state — that is normal.)
 
 ## Interactive GUI (needs a display)
 
@@ -93,6 +97,25 @@ shut down via stdin close).
 6. Quit (ctrl+q or window close) → `family.json` updated with the active
    member + session ids; relaunch resumes the conversation
 
+## Windows (verified 2026-11-14, full checklist PASS)
+
+- **Toolchain**: if the machine's MSVC/VS 2022 install is incomplete (no
+  `lib\x64`, no Windows SDK 10, no CRT headers) or a Git Bash `/usr/bin/link`
+  shadows MSVC's `link.exe`, build with the GNU toolchain instead:
+  `rustup run 1.99.1-x86_64-pc-windows-gnu cargo build` (MSYS2). The code
+  builds warning-free on both msvc and windows-gnu.
+- **pi**: when launching from Git Bash, the child process may not find `pi`
+  (bash-style `/c/...` PATH entries are unusable to a Windows child) — use
+  `--pi C:\Users\<you>\AppData\Roaming\npm\pi.cmd`.
+- **Config**: `family.json` lives at `%APPDATA%\pi-milya\family.json`; a
+  legacy `~\.config\pi-milya\family.json` (XDG-style) is honored when it
+  already exists. An unset `HOME` no longer panics.
+- **Verified**: build → smoke → wizard (live model list) → chat round-trip
+  (pong, streamed thinking, markdown) → two members + ctrl+n (background
+  stream survives tab switches) → edit member (prefill + restart) → quit /
+  relaunch (family.json loads, `session_id` resumes — the model answered a
+  question about the pre-quit conversation).
+
 ## Known-good / gotchas (from the 2026-11-14 build)
 
 - The GUI must keep its tokio `Runtime` alive (`rt_keep` field) — a bare
@@ -105,8 +128,14 @@ shut down via stdin close).
   context with the default features, `run_native`'s closure returns a
   `Result`.
 - pi's `get_state` returns `model` as an object (`id`/`name`) — display
-  uses `name`.
+  uses `name`. It is `null` before a model is set (e.g. `--no-session`
+  without `-m`); smoke prints `model: default` in that case.
 - `/dev/urandom` must be read with fixed-size `read_exact` (a blocking
   `fs::read` hangs forever) — the uuid fallback in `pi_client.rs` does.
+- Unconfirmed (Windows, one 1536x960 session): the bottom input bar and
+  top header buttons were clipped while the chat area extended to the
+  window bottom; 2560x1440 rendered correctly. If reproducible, resize /
+  maximize the window — likely an egui/winit viewport quirk at that
+  resolution, not a code path (same build, same code).
 - `plywoodsheetcalculator` (unrelated repo) still has `node_modules/`
   committed if you ever wonder about that finding.

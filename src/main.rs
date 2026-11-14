@@ -112,7 +112,10 @@ async fn smoke(cfg: &config::Config) -> Result<()> {
                 if !ok {
                     anyhow::bail!("smoke: get_state failed: {}", resp.get("error").and_then(|v| v.as_str()).unwrap_or("?"));
                 }
-                eprintln!("smoke: state ok (model: {})", resp["data"].get("model").and_then(|m| m.get("modelId")).and_then(|v| v.as_str()).unwrap_or("?"));
+                let model = resp["data"]
+                    .get("model")
+                    .and_then(|m| m.get("name").or_else(|| m.get("id")).and_then(|x| x.as_str()));
+                eprintln!("smoke: state ok (model: {})", model.unwrap_or("default"));
                 // now send the prompt
                 client
                     .send(

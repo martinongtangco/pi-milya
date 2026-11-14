@@ -26,11 +26,27 @@ pub struct Family {
 
 impl Family {
     pub fn path() -> PathBuf {
-        let base = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-            .expect("HOME is set");
-        base.join("pi-milya").join("family.json")
+        let dir = if cfg!(target_os = "windows") {
+            // %APPDATA%\pi-milya is the native location; keep a legacy ~/.config
+            // directory if it already holds a family.json (no forced migration).
+            let appdata = std::env::var_os("APPDATA")
+                .map(|a| PathBuf::from(a).join("pi-milya"));
+            let legacy = std::env::var_os("HOME")
+                .map(|h| PathBuf::from(h).join(".config").join("pi-milya"));
+            match (appdata, legacy) {
+                (Some(_), Some(l)) if l.join("family.json").exists() => l,
+                (Some(a), _) => a,
+                (None, Some(l)) => l,
+                (None, None) => PathBuf::from(".pi-milya"),
+            }
+        } else if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+            PathBuf::from(xdg).join("pi-milya")
+        } else if let Some(home) = std::env::var_os("HOME") {
+            PathBuf::from(home).join(".config").join("pi-milya")
+        } else {
+            PathBuf::from(".pi-milya")
+        };
+        dir.join("family.json")
     }
 
     pub fn load() -> Option<Self> {
