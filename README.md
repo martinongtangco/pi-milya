@@ -57,6 +57,14 @@ All normal pi CLI options pass through: `--pi`, `--cwd`, `--model`,
 
 The same core, a real window. `cargo run --bin pi-milya-gui`.
 
+Works on Linux and Windows (eframe/winit; just needs a local `pi` — pass
+`--pi /path/to/pi` if it is not on PATH).
+
+| | |
+|---|---|
+| ![](docs/screenshot-main.png) | ![](docs/screenshot-wizard.png) |
+| main view (member connected, live model name) | first-run wizard form |
+
 - **Family sidebar** (left): every member's ASCII face, name, model + thinking,
   status dot; click to switch. All members' conversations coexist — streams
   keep flowing in the background regardless of the open tab.
@@ -74,6 +82,12 @@ Built against eframe/egui 0.29 (single-string `RichText`, `TopBottomPanel::botto
 `ComboBox::show_index`, `ViewportCommand::Close/Title`). The GUI owns a tokio
 runtime that stays alive for the whole app; pi records are bridged from the
 runtime into the egui event loop each frame.
+
+![](docs/screenshot-chat.png)
+
+**[TESTING.md](TESTING.md)** has the full verification guide — interactive,
+headless (Xvfb + xdotool + ffmpeg, the procedure used for the verified
+end-to-end run), and a pass/fail checklist.
 
 ## Keys
 
