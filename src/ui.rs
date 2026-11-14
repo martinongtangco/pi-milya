@@ -6,9 +6,8 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
-use ratatui::Frame;
 
-use crate::app::{App, Item, Phase};
+use pi_milya::app::{App, Item, Phase};
 
 const PANE_W: u16 = 30;
 
@@ -140,7 +139,7 @@ fn draw_chat_pane(f: &mut ratatui::Frame, app: &App, area: Rect) {
     );
 }
 
-fn draw_scrollback(f: &mut ratatui::Frame, _app: &App, m: &crate::app::MemberState, area: Rect) {
+fn draw_scrollback(f: &mut ratatui::Frame, _app: &App, m: &pi_milya::app::MemberState, area: Rect) {
     let mut content: Vec<Line> = Vec::new();
     let h = area.height as usize;
     for item in m.items.iter() {
@@ -257,11 +256,11 @@ fn draw_input(f: &mut ratatui::Frame, app: &App, area: Rect) {
 fn draw_wizard(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let Some(w) = &app.wizard else { return };
     let (step_n, title) = match w.step {
-        crate::app::WizStep::Name => (1, "name"),
-        crate::app::WizStep::Model => (2, "model"),
-        crate::app::WizStep::Thinking => (3, "thinking"),
-        crate::app::WizStep::Face => (4, "face"),
-        crate::app::WizStep::Prompt => (5, "system prompt"),
+        pi_milya::app::WizStep::Name => (1, "name"),
+        pi_milya::app::WizStep::Model => (2, "model"),
+        pi_milya::app::WizStep::Thinking => (3, "thinking"),
+        pi_milya::app::WizStep::Face => (4, "face"),
+        pi_milya::app::WizStep::Prompt => (5, "system prompt"),
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -279,7 +278,7 @@ fn draw_wizard(f: &mut ratatui::Frame, app: &App, area: Rect) {
 
     let mut lines: Vec<Line> = Vec::new();
     match w.step {
-        crate::app::WizStep::Name => {
+        pi_milya::app::WizStep::Name => {
             lines.push(Line::from(Span::styled("give this family member a name", Style::default().fg(Color::DarkGray))));
             lines.push(Line::from(vec![
                 Span::styled("> ", Style::default().fg(Color::Cyan)),
@@ -288,7 +287,7 @@ fn draw_wizard(f: &mut ratatui::Frame, app: &App, area: Rect) {
             ]));
             lines.push(Line::from(Span::styled("enter to continue · esc to go back", Style::default().fg(Color::DarkGray))));
         }
-        crate::app::WizStep::Model => {
+        pi_milya::app::WizStep::Model => {
             if w.model_list.is_empty() {
                 lines.push(Line::from(Span::styled(
                     if w.model_pending { "fetching models from pi …" } else { "no models available — check your llamesa setup" },
@@ -308,8 +307,8 @@ fn draw_wizard(f: &mut ratatui::Frame, app: &App, area: Rect) {
                 lines.push(Line::from(Span::styled("up/down · enter to pick · esc to go back", Style::default().fg(Color::DarkGray))));
             }
         }
-        crate::app::WizStep::Thinking => {
-            for (i, l) in crate::family::THINKING_LEVELS.iter().enumerate() {
+        pi_milya::app::WizStep::Thinking => {
+            for (i, l) in pi_milya::family::THINKING_LEVELS.iter().enumerate() {
                 let sel = i == w.sel;
                 let marker = if sel { "▸ " } else { "  " };
                 let style = if sel { Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Gray) };
@@ -317,9 +316,9 @@ fn draw_wizard(f: &mut ratatui::Frame, app: &App, area: Rect) {
             }
             lines.push(Line::from(Span::styled("up/down · enter to pick · esc to go back", Style::default().fg(Color::DarkGray))));
         }
-        crate::app::WizStep::Face => {
+        pi_milya::app::WizStep::Face => {
             lines.push(Line::raw("pick a face for the member:"));
-            for (i, (name, art)) in crate::family::FACE_PRESETS.iter().enumerate() {
+            for (i, (name, art)) in pi_milya::family::FACE_PRESETS.iter().enumerate() {
                 let sel = i == w.sel;
                 for (li, fl) in art.iter().enumerate() {
                     let style = if sel { Style::default().fg(Color::Green).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::DarkGray) };
@@ -328,7 +327,7 @@ fn draw_wizard(f: &mut ratatui::Frame, app: &App, area: Rect) {
             }
             lines.push(Line::from(Span::styled("up/down · enter to pick · esc to go back", Style::default().fg(Color::DarkGray))));
         }
-        crate::app::WizStep::Prompt => {
+        pi_milya::app::WizStep::Prompt => {
             lines.push(Line::from(Span::styled("system prompt (appended to pi's prompt; empty is fine)", Style::default().fg(Color::DarkGray))));
             for (i, l) in w.prompt.iter().enumerate() {
                 let prefix = if i == 0 { "> " } else { "  " };

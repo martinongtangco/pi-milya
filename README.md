@@ -43,7 +43,8 @@ See [pi docs: rpc.md](https://github.com/earendil-works/pi/blob/main/packages/co
 ## Run
 
 ```sh
-cargo run --                     # in the cwd where the sessions should live
+cargo run --                     # TUI, in the cwd where the sessions should live
+cargo run --bin pi-milya-gui     # GUI (egui window)
 cargo run -- --no-session        # in-memory sessions
 cargo run -- --smoke             # non-TUI end-to-end check
 ```
@@ -51,6 +52,28 @@ cargo run -- --smoke             # non-TUI end-to-end check
 All normal pi CLI options pass through: `--pi`, `--cwd`, `--model`,
 `--thinking`, `--session-id`, `--session-dir`, `--name`, `--tools`,
 `--system-prompt`.
+
+## GUI (egui)
+
+The same core, a real window. `cargo run --bin pi-milya-gui`.
+
+- **Family sidebar** (left): every member's ASCII face, name, model + thinking,
+  status dot; click to switch. All members' conversations coexist — streams
+  keep flowing in the background regardless of the open tab.
+- **Tabs + chat pane**: per-member status dots; markdown-rendered assistant
+  text (headings, code blocks, lists), full thinking transcripts, tool rows.
+- **First run / `new member` / `edit member`**: a real form (name, model
+  combo populated live from pi, thinking level, face picker, system prompt)
+  — no key-fu.
+- **Keys**: `ctrl+n` / `ctrl+p` switch members, `ctrl+q` quit; the input bar
+  sends on `enter` (shift+enter = newline) and has `send` / `abort` buttons.
+- Shares `~/.config/pi-milya/family.json` with the TUI — members, models and
+  sessions are identical in both frontends.
+
+Built against eframe/egui 0.29 (single-string `RichText`, `TopBottomPanel::bottom`,
+`ComboBox::show_index`, `ViewportCommand::Close/Title`). The GUI owns a tokio
+runtime that stays alive for the whole app; pi records are bridged from the
+runtime into the egui event loop each frame.
 
 ## Keys
 
@@ -88,7 +111,9 @@ active member), `/clear` (new session), `/abort`, `/compact`, `/stats`,
 
 | module | role |
 |---|---|
+| `src/lib.rs` | the shared core (exposes the modules below) |
 | `src/main.rs` | CLI args, TUI event loop, `--smoke` |
+| `src/gui_main.rs` | egui window: family sidebar, tabs, markdown chat, wizard form |
 | `src/config.rs` | flag parsing |
 | `src/family.rs` | `Member`/`Family` model, persistence, face presets, thinking levels |
 | `src/pi_client.rs` | spawn + JSONL framing + command/response correlation |

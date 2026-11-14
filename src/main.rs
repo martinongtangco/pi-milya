@@ -1,10 +1,5 @@
 //! pi-milya — a Grok-style chat TUI on the pi agent (`pi --mode rpc`).
 
-mod app;
-mod config;
-mod family;
-mod pi_client;
-mod protocol;
 mod ui;
 
 use std::io::{self, Write};
@@ -14,15 +9,14 @@ use anyhow::Result;
 use crossterm::event::{self, Event};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::execute;
+use pi_milya::app::App;
+use pi_milya::config::{self, parse_args};
+use pi_milya::pi_client::PiClient;
+use pi_milya::protocol::{AmEvent, CmdKind, PiEvent, Rec};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use serde_json::json;
 use tokio::sync::mpsc;
-
-use app::App;
-use config::parse_args;
-use pi_client::PiClient;
-use protocol::{AmEvent, CmdKind, PiEvent, Rec};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -80,9 +74,9 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, cfg: &config
     loop {
         let step = app.next(&mut key_rx).await;
         match step {
-            app::Step::Key(k) => app.on_key(k),
-            app::Step::Rec(idx, rec) => app.on_record(idx, rec),
-            app::Step::Idle => {}
+            pi_milya::app::Step::Key(k) => app.on_key(k),
+            pi_milya::app::Step::Rec(idx, rec) => app.on_record(idx, rec),
+            pi_milya::app::Step::Idle => {}
         }
         app.flush_action().await;
         if app.exiting {
@@ -129,7 +123,7 @@ async fn smoke(cfg: &config::Config) -> Result<()> {
             }
             Rec::Cmd { .. } => {}
             Rec::Event(v) => {
-                let e = protocol::parse_event(&v);
+                let e = pi_milya::protocol::parse_event(&v);
                 if let PiEvent::MessageUpdate { ame, .. } = &e {
                     if let AmEvent::TextDelta { delta, .. } = ame {
                         print!("{delta}");
