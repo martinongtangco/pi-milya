@@ -1,8 +1,10 @@
-//! Application state: chat items, input editor, menus, and pi event handling.
+//! Application state: the family of agent members, per-member chat state,
+//! the first-run setup wizard, and pi event routing.
 //!
 //! Design: `on_key` is synchronous (editing only). Anything that must talk to
 //! pi is queued as a `KeyAction` and executed by the async event loop in
-//! `flush_action()`.
+//! `flush_action()`. Each member with a live pi process has a forwarder task
+//! that tags its records with the member index; the app demultiplexes.
 
 use std::collections::VecDeque;
 
@@ -11,14 +13,11 @@ use serde_json::json;
 use tokio::sync::mpsc;
 
 use crate::config::Config;
+use crate::family::{Family, Member, FACE_PRESETS, THINKING_LEVELS};
 use crate::pi_client::PiClient;
-use crate::protocol::{args_summary, extract_models, parse_event, AmEvent, CmdKind, PiEvent, Rec};
-
-/// One step of the event loop: either a key event or a pi record.
-pub enum Step {
-    Key(KeyEvent),
-    Rec(Option<Rec>),
-}
+use crate::protocol::{
+    args_summary, extract_models, parse_event, AmEvent, CmdKind, PiEvent, Rec,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
@@ -34,6 +33,10 @@ pub enum KeyAction {
     Esc,
     Quit,
     PickModel(String),
+    NextMember,
+    PrevMember,
+    NewMember,
+    EditMember,
 }
 
 pub enum Item {
@@ -77,100 +80,794 @@ pub struct Queue {
     pub follow_up: Vec<String>,
 }
 
-pub enum Menu {
-    Slash { selected: usize },
-    Models { list: Vec<(String, String)>, selected: usize },
-    Help,
+/// Per-member runtime state: config + live client + chat.
+pub struct MemberState {
+    pub member: Member,
+    pub client: Option<PiClient>,
+    pub phase: Phase,
+    pub items: Vec<Item>,
+    pub queue: Queue,
+    pub model: Option<String>,
+    pub thinking: Option<String>,
+    pub session_id: Option<String>,
+    pub last_usage: Option<crate::protocol::Usage>,
+    pub total_cost: f64,
+    pub total_tokens: u64,
+    cur_usage: Option<crate::protocol::Usage>,
+}
+
+impl MemberState {
+    fn new(member: Member) -> Self {
+        let session_id = member.session_id.clone();
+        Self {
+            member,
+            client: None,
+            phase: Phase::Connecting,
+            items: vec![],
+            queue: Queue {
+                steering: Vec::new(),
+                follow_up: Vec::new(),
+            },
+            model: None,
+            thinking: None,
+            session_id,
+            last_usage: None,
+            total_cost: 0.0,
+            total_tokens: 0,
+            cur_usage: None,
+        }
+    }
+
+    pub fn note(&mut self, text: impl Into<String>) {
+        self.items.push(Item::Note(text.into()));
+    }
+
+    pub fn error(&mut self, text: impl Into<String>) {
+        self.items.push(Item::Err(text.into()));
+    }
+
+    pub fn on_record(&mut self, rec: Rec) {
+        match rec {
+            Rec::Cmd { kind, resp } => self.on_cmd_response(kind, &resp),
+            Rec::Event(v) => {
+                if v.get("type").and_then(|t| t.as_str()) == Some("response") {
+                    if v.get("success").and_then(|s| s.as_bool()) == Some(false) {
+                        self.error(
+                            v.get("error")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("command failed")
+                                .to_string(),
+                        );
+                    }
+                    return;
+                }
+                self.on_event(parse_event(&v));
+            }
+            Rec::Stderr(_) => {}
+        }
+    }
+
+    fn on_cmd_response(&mut self, kind: CmdKind, resp: &serde_json::Value) {
+        let ok = resp.get("success").and_then(|x| x.as_bool()).unwrap_or(false);
+        let data = resp.get("data").cloned().unwrap_or(serde_json::Value::Null);
+        let err = || {
+            resp.get("error")
+                .and_then(|x| x.as_str())
+                .unwrap_or("command failed")
+                .to_string()
+        };
+        match kind {
+            CmdKind::Prompt => {
+                if !ok {
+                    self.phase = Phase::Idle;
+                    self.error(err());
+                } else if data
+                    .get("disposition")
+                    .and_then(|x| x.as_str())
+                    .is_some_and(|d| d == "handled")
+                {
+                    self.phase = Phase::Idle;
+                }
+            }
+            CmdKind::GetState => {
+                if ok {
+                    self.model = data
+                        .get("model")
+                        .and_then(|m| {
+                            m.get("name")
+                                .or_else(|| m.get("id"))
+                                .and_then(|x| x.as_str())
+                                .map(|s| s.to_string())
+                        })
+                        .or_else(|| {
+                            data.get("model")
+                                .and_then(|x| x.as_str())
+                                .map(|s| s.to_string())
+                        });
+                    self.thinking = data
+                        .get("thinkingLevel")
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.to_string());
+                    if let Some(sid) = data
+                        .get("sessionId")
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.to_string())
+                    {
+                        if Some(sid.clone()) != self.session_id {
+                            self.session_id = Some(sid.clone());
+                            self.member.session_id = Some(sid);
+                        }
+                    }
+                    self.items
+                        .retain(|i| !matches!(i, Item::Note(n) if n.starts_with("…")));
+                    self.phase = Phase::Idle;
+                } else {
+                    self.error(err());
+                    self.phase = Phase::Idle;
+                }
+            }
+            CmdKind::SetModel => {
+                if ok {
+                    self.note(format!(
+                        "model → {}",
+                        data.get("modelId")
+                            .and_then(|x| x.as_str())
+                            .or_else(|| data.get("model").and_then(|x| x.as_str()))
+                            .unwrap_or("set")
+                    ));
+                } else {
+                    self.error(err());
+                }
+            }
+            CmdKind::SetThinking => {
+                if ok {
+                    self.note("thinking level set");
+                } else {
+                    self.error(err());
+                }
+            }
+            CmdKind::NewSession => {
+                if ok {
+                    let cancelled = data
+                        .get("cancelled")
+                        .and_then(|x| x.as_bool())
+                        .unwrap_or(false);
+                    if cancelled {
+                        self.note("new session cancelled by extension");
+                    } else {
+                        self.items.retain(|i| !matches!(i, Item::Asst(_)));
+                        self.items.retain(|i| !matches!(i, Item::User(_)));
+                        self.note("new session started");
+                    }
+                } else {
+                    self.error(err());
+                }
+            }
+            CmdKind::Abort => {
+                if ok {
+                    self.note("abort requested");
+                }
+            }
+            CmdKind::Compact => {
+                if ok {
+                    self.note("compaction requested");
+                } else {
+                    self.error(err());
+                }
+            }
+            CmdKind::Stats => {
+                if ok {
+                    self.note(format!("stats: {}", compact_json(&data)));
+                } else {
+                    self.error(err());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn on_event(&mut self, e: PiEvent) {
+        match e {
+            PiEvent::AgentStart => self.phase = Phase::Running,
+            PiEvent::AgentSettled { aborted } => {
+                self.phase = Phase::Idle;
+                if aborted {
+                    self.note("agent run aborted");
+                }
+            }
+            PiEvent::TurnEnd => {}
+            PiEvent::MessageStart { role } if role == "assistant" => {
+                self.items.push(Item::Asst(AssistMsg::new()));
+            }
+            PiEvent::MessageStart { .. } => {}
+            PiEvent::MessageUpdate { usage, ame } => {
+                if let Some(u) = usage {
+                    self.cur_usage = Some(u);
+                }
+                match ame {
+                    AmEvent::TextDelta { delta, .. } => self.apply_to_last_asst(|a| a.text.push_str(&delta)),
+                    AmEvent::TextEnd { content, .. } => self.apply_to_last_asst(|a| a.text = content),
+                    AmEvent::ThinkingDelta { delta, .. } => self.apply_to_last_asst(|a| a.thinking.push_str(&delta)),
+                    AmEvent::ThinkingEnd { content, .. } => self.apply_to_last_asst(|a| a.thinking = content),
+                    AmEvent::Error { msg } => self.error(msg),
+                    AmEvent::ToolCallStart { .. } | AmEvent::Other => {}
+                }
+            }
+            PiEvent::MessageEnd => {
+                if let Some(a) = self.last_asst_mut() {
+                    a.streaming = false;
+                }
+                if let Some(u) = self.cur_usage.take() {
+                    self.total_cost += u.cost;
+                    self.total_tokens += u.total;
+                    self.last_usage = Some(u);
+                }
+            }
+            PiEvent::ToolStart { name, args, .. } => {
+                self.apply_to_last_asst(|a| {
+                    a.tools.push(ToolRow {
+                        name: name.clone(),
+                        summary: args_summary(&args),
+                        running: true,
+                        is_error: false,
+                        output: String::new(),
+                        duration_ms: None,
+                    });
+                });
+            }
+            PiEvent::ToolUpdate { partial, .. } => {
+                self.apply_to_last_asst(|a| {
+                    if let Some(row) = a.tools.iter_mut().find(|t| t.running) {
+                        row.output = partial;
+                    }
+                });
+            }
+            PiEvent::ToolEnd { result, .. } => {
+                self.apply_to_last_asst(|a| {
+                    if let Some(row) = a.tools.iter_mut().find(|t| t.running) {
+                        row.running = false;
+                        row.is_error = result.is_error;
+                        row.duration_ms = result.duration_ms;
+                        row.output = result.output;
+                    } else if let Some(row) = a.tools.last_mut() {
+                        row.running = false;
+                        row.is_error = result.is_error;
+                        row.duration_ms = result.duration_ms;
+                        row.output = result.output;
+                    }
+                });
+            }
+            PiEvent::QueueUpdate { steering, follow_up } => {
+                self.queue.steering = steering;
+                self.queue.follow_up = follow_up;
+            }
+            PiEvent::ThinkingLevelChanged { level } => {
+                self.thinking = Some(level.clone());
+                self.note(format!("thinking level → {level}"));
+            }
+            PiEvent::CompactionStart { reason } => self.note(format!("compacting ({reason}) …")),
+            PiEvent::CompactionEnd { aborted, error, tokens_after } => {
+                if aborted {
+                    self.note("compaction aborted");
+                } else if let Some(err) = error {
+                    self.error(format!("compaction failed: {err}"));
+                } else {
+                    self.note(match tokens_after {
+                        Some(t) => format!("compaction done · ~{t} tokens"),
+                        None => "compaction done".to_string(),
+                    });
+                }
+            }
+            PiEvent::AutoRetryStart { attempt, max_attempts, error } => self.note(format!(
+                "retry {attempt}/{max_attempts}{}",
+                error.map(|e| format!(" ({e})")).unwrap_or_default()
+            )),
+            PiEvent::AutoRetryEnd { success, final_error } => {
+                if success {
+                    self.note("retry succeeded");
+                } else if let Some(e) = final_error {
+                    self.error(format!("retry failed: {e}"));
+                }
+            }
+            PiEvent::ExtensionError { error } => self.error(error),
+            PiEvent::SessionNameChanged { .. } => {}
+            PiEvent::Other(_) => {}
+        }
+    }
+
+    fn last_asst_mut(&mut self) -> Option<&mut AssistMsg> {
+        self.items.iter_mut().rev().find_map(|i| match i {
+            Item::Asst(a) => Some(a),
+            _ => None,
+        })
+    }
+
+    fn apply_to_last_asst(&mut self, f: impl FnOnce(&mut AssistMsg)) {
+        if self.last_asst_mut().is_none() {
+            self.items.push(Item::Asst(AssistMsg::new()));
+        }
+        if let Some(a) = self.last_asst_mut() {
+            f(a);
+        }
+    }
+}
+
+fn compact_json(v: &serde_json::Value) -> String {
+    let s = v.to_string();
+    if s.len() > 200 {
+        s.chars().take(200).collect::<String>() + "…"
+    } else {
+        s
+    }
+}
+
+// ---------------- wizard ----------------
+
+pub enum WizStep {
+    Name,
+    Model,
+    Thinking,
+    Face,
+    Prompt,
+}
+
+pub struct Wizard {
+    pub step: WizStep,
+    pub is_new: bool,
+    pub editing_idx: Option<usize>,
+    pub name: String,
+    pub model: Option<String>,
+    pub thinking: Option<String>,
+    pub face: Option<String>,
+    pub prompt: Vec<String>,
+    pub model_list: Vec<(String, String)>,
+    pub model_pending: bool,
+    pub sel: usize,
+}
+
+impl Wizard {
+    fn new(is_new: bool, editing_idx: Option<usize>) -> Self {
+        Self {
+            step: WizStep::Name,
+            is_new,
+            editing_idx,
+            name: String::new(),
+            model: None,
+            thinking: None,
+            face: None,
+            prompt: vec![String::new()],
+            model_list: Vec::new(),
+            model_pending: false,
+            sel: 3, // new members default to thinking=medium
+        }
+    }
+
+    fn prefill(&mut self, m: &Member) {
+        self.name = m.name.clone();
+        self.model = Some(m.model.clone());
+        self.thinking = Some(m.thinking.clone());
+        self.face = Some(m.face.clone());
+        self.prompt = m
+            .system_prompt
+            .clone()
+            .unwrap_or_default()
+            .split('\n')
+            .map(str::to_string)
+            .collect();
+        self.sel = THINKING_LEVELS
+            .iter()
+            .position(|l| *l == m.thinking.as_str())
+            .unwrap_or(3);
+    }
 }
 
 pub const SLASH_COMMANDS: &[&str] = &[
-    "/model",
-    "/think",
-    "/clear",
-    "/abort",
-    "/compact",
-    "/stats",
-    "/help",
-    "/quit",
+    "/model", "/think", "/clear", "/abort", "/compact", "/stats", "/new", "/edit", "/help", "/quit",
 ];
 
+// ---------------- app ----------------
+
 pub struct App {
-    pub client: Option<PiClient>,
     pub cfg: Config,
-    pub phase: Phase,
-    pub items: Vec<Item>,
+    pub family: Family,
+    pub members: Vec<MemberState>,
+    pub active: usize,
     pub input: Vec<String>,
     pub cursor_line: usize,
     pub cursor_col: usize,
     pub history: Vec<Vec<String>>,
     pub hist_idx: Option<usize>,
-    pub model: Option<String>,
-    pub thinking: Option<String>,
-    pub session_id: Option<String>,
-    pub session_name: Option<String>,
-    pub queue: Queue,
-    pub last_usage: Option<crate::protocol::Usage>,
-    pub total_cost: f64,
-    pub total_tokens: u64,
-    pub menu: Option<Menu>,
+    pub menu: Option<MenuItem>,
+    pub wizard: Option<Wizard>,
     pub stderr_tail: VecDeque<String>,
     pub exiting: bool,
     pending_action: Option<KeyAction>,
-    cur_usage: Option<crate::protocol::Usage>,
+    rec_rx: mpsc::Receiver<(usize, Rec)>,
+    rec_tx: mpsc::Sender<(usize, Rec)>,
+    model_list_rx: Option<mpsc::Receiver<Vec<(String, String)>>>,
+    finish_wizard_pending: bool,
+}
+
+pub enum MenuItem {
+    Slash { selected: usize },
+    Models { list: Vec<(String, String)>, selected: usize },
+    Help,
 }
 
 impl App {
     pub fn new(cfg: Config) -> Self {
+        let (rec_tx, rec_rx) = mpsc::channel(2048);
+        let mut family = Family::load().unwrap_or(Family {
+            members: Vec::new(),
+            active: 0,
+        });
+        family.clamp_active();
+        let members = family.members.iter().cloned().map(MemberState::new).collect();
         Self {
-            client: None,
             cfg,
-            phase: Phase::Connecting,
-            items: vec![Item::Note("connecting to pi (rpc mode) …".into())],
+            family,
+            members,
+            active: 0,
             input: vec![String::new()],
             cursor_line: 0,
             cursor_col: 0,
             history: Vec::new(),
             hist_idx: None,
-            model: None,
-            thinking: None,
-            session_id: None,
-            session_name: None,
-            queue: Queue {
-                steering: Vec::new(),
-                follow_up: Vec::new(),
-            },
-            last_usage: None,
-            total_cost: 0.0,
-            total_tokens: 0,
             menu: None,
+            wizard: None,
             stderr_tail: VecDeque::with_capacity(5),
             exiting: false,
             pending_action: None,
-            cur_usage: None,
+            rec_rx,
+            rec_tx,
+            model_list_rx: None,
+            finish_wizard_pending: false,
         }
     }
 
+    /// Load family state, open the wizard when there is no family yet,
+    /// and connect the active member.
     pub async fn start(&mut self) -> anyhow::Result<()> {
-        let client = PiClient::spawn(&self.cfg).await?;
-        self.client = Some(client);
-        if let Some(c) = self.client.as_mut() {
-            c.send(CmdKind::GetState, json!({ "type": "get_state" })).await;
+        if self.members.is_empty() {
+            self.open_wizard(true, None);
+            return Ok(());
         }
+        self.ensure_active_member().await;
         Ok(())
     }
 
-    /// Block for the next input event (key or pi record). Encapsulating the
-    /// select here keeps the `&mut self` borrow to a single site.
-    pub async fn next(&mut self, key_rx: &mut mpsc::Receiver<KeyEvent>) -> Step {
-        tokio::select! {
-            k = key_rx.recv() => Step::Key(k.expect("key channel closed")),
-            r = self.client.as_mut().expect("client present").next() => Step::Rec(r),
+    fn active_mut(&mut self) -> Option<&mut MemberState> {
+        self.members.get_mut(self.active)
+    }
+
+    fn active(&self) -> Option<&MemberState> {
+        self.members.get(self.active)
+    }
+
+    // ---------------- member lifecycle ----------------
+
+    async fn ensure_active_member(&mut self) {
+        let idx = self.active;
+        if self.members.get(idx).is_none() {
+            return;
+        }
+        if self.members[idx].client.is_some() {
+            return;
+        }
+        let member = self.members[idx].member.clone();
+        let mut cfg = self.cfg.clone();
+        cfg.model = Some(member.model.clone());
+        cfg.thinking = Some(member.thinking.clone());
+        cfg.system_prompt = member.system_prompt.clone();
+        cfg.session_id = member.session_id.clone();
+        let mut spawn = match PiClient::spawn(&cfg, self.rec_tx.clone(), idx).await {
+            Ok(c) => c,
+            Err(e) => {
+                self.members[idx].error(format!("pi spawn failed: {e}"));
+                self.members[idx].phase = Phase::Idle;
+                return;
+            }
+        };
+        spawn.send(CmdKind::GetState, json!({ "type": "get_state" })).await;
+        self.members[idx].client = Some(spawn);
+        self.members[idx].phase = Phase::Connecting;
+        self.members[idx]
+            .note(format!("… {} connecting", member.name));
+    }
+
+    /// (Re)start a member's client, e.g. after /edit changed its config.
+    async fn restart_member(&mut self, idx: usize) {
+        if let Some(old) = self.members.get_mut(idx).and_then(|m| m.client.take()) {
+            tokio::spawn(async move {
+                let mut old = old;
+                old.shutdown().await;
+            });
+        }
+        self.ensure_active_member().await;
+    }
+    fn sync_sessions(&mut self) {
+        for (i, m) in self.members.iter().enumerate() {
+            if let Some(fam) = self.family.member_mut(i) {
+                fam.session_id = m.session_id.clone();
+            }
         }
     }
 
-    // ---------------- key handling (synchronous: editing + queueing) ----------------
+    fn switch_member(&mut self, dir: i64) {
+        if self.members.len() <= 1 {
+            return;
+        }
+        let len = self.members.len() as i64;
+        self.active = (((self.active as i64 + dir) % len + len) % len) as usize;
+        self.family.active = self.active;
+        self.sync_sessions();
+        self.family.save();
+        self.note_to_active(format!("— {} —", self.members[self.active].member.name));
+    }
+
+    fn note_to_active(&mut self, text: impl Into<String>) {
+        if let Some(m) = self.active_mut() {
+            m.note(text);
+        }
+    }
+
+    // ---------------- wizard ----------------
+
+    fn open_wizard(&mut self, is_new: bool, editing_idx: Option<usize>) {
+        let mut w = Wizard::new(is_new, editing_idx);
+        if let Some(idx) = editing_idx {
+            if let Some(m) = self.members.get(idx) {
+                w.prefill(&m.member);
+            }
+        }
+        let cfg = self.cfg.clone();
+        let (tx, rx) = mpsc::channel(1);
+        self.model_list_rx = Some(rx);
+        w.model_pending = true;
+        tokio::spawn(async move {
+            let (t2, mut r2) = mpsc::channel(64);
+            let list = match PiClient::spawn(&cfg, t2, usize::MAX).await {
+                Ok(mut c) => {
+                    c.send(CmdKind::GetModels, json!({ "type": "get_available_models" }))
+                        .await;
+                    let mut out = Vec::new();
+                    for _ in 0..1000 {
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(30),
+                            r2.recv(),
+                        )
+                        .await
+                        {
+                            Ok(Some((_, Rec::Cmd { kind: CmdKind::GetModels, resp }))) => {
+                                if resp
+                                    .get("success")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(false)
+                                {
+                                    let data = resp
+                                        .get("data")
+                                        .cloned()
+                                        .unwrap_or(serde_json::Value::Null);
+                                    out = extract_models(&data);
+                                }
+                                break;
+                            }
+                            Ok(Some(_)) => continue,
+                            _ => break,
+                        }
+                    }
+                    c.shutdown().await;
+                    out
+                }
+                Err(_) => Vec::new(),
+            };
+            let _ = tx.send(list).await;
+        });
+        self.wizard = Some(w);
+    }
+
+    async fn finish_wizard(&mut self) {
+        let Some(w) = self.wizard.take() else { return };
+        let face = w
+            .face
+            .clone()
+            .unwrap_or_else(|| FACE_PRESETS[0].1.join("\n"));
+        let prompt = w.prompt.join("\n");
+        let prompt = if prompt.trim().is_empty() { None } else { Some(prompt) };
+        match w.editing_idx {
+            Some(idx) => {
+                if let Some(m) = self.members.get_mut(idx) {
+                    m.member.name = w.name.clone();
+                    m.member.face = face;
+                    m.member.model = w.model.clone().unwrap_or_else(|| m.member.model.clone());
+                    m.member.thinking = w.thinking.clone().unwrap_or_else(|| m.member.thinking.clone());
+                    m.member.system_prompt = prompt;
+                    m.client = None;
+                }
+                self.restart_member(idx).await;
+                self.note_to_active(format!("— {} updated —", w.name));
+            }
+            None => {
+                let member = Member {
+                    id: crate::family::new_member_id(),
+                    name: w.name.clone(),
+                    face,
+                    model: w.model.clone().unwrap_or_default(),
+                    thinking: w.thinking.clone().unwrap_or_else(|| "medium".into()),
+                    system_prompt: prompt,
+                    session_id: None,
+                };
+                self.members.push(MemberState::new(member.clone()));
+                self.family.members.push(member);
+                self.active = self.members.len() - 1;
+                self.family.active = self.active;
+                self.ensure_active_member().await;
+                self.note_to_active("welcome to the family".to_string());
+            }
+        }
+        self.sync_sessions();
+        self.family.save();
+    }
+
+    fn wizard_key(&mut self, key: KeyEvent) -> bool {
+        let Some(w) = self.wizard.as_mut() else { return false };
+        if w.model_pending {
+            if let Some(rx) = self.model_list_rx.as_mut() {
+                if let Ok(list) = rx.try_recv() {
+                    w.model_list = list;
+                    w.model_pending = false;
+                }
+            }
+        }
+        match w.step {
+            WizStep::Name => match key.code {
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    w.name.push(c);
+                    true
+                }
+                KeyCode::Backspace => {
+                    w.name.pop();
+                    true
+                }
+                KeyCode::Enter => {
+                    if !w.name.trim().is_empty() {
+                        w.step = WizStep::Model;
+                        w.sel = w
+                            .model
+                            .as_ref()
+                            .and_then(|m| w.model_list.iter().position(|(id, _)| id == m))
+                            .unwrap_or(0);
+                    }
+                    true
+                }
+                KeyCode::Esc => {
+                    if w.is_new && self.members.is_empty() {
+                        true
+                    } else {
+                        self.wizard = None;
+                        true
+                    }
+                }
+                _ => false,
+            },
+            WizStep::Model => {
+                let n = w.model_list.len().max(1);
+                match key.code {
+                    KeyCode::Up => {
+                        w.sel = w.sel.saturating_sub(1);
+                        true
+                    }
+                    KeyCode::Down => {
+                        w.sel = (w.sel + 1).min(n - 1);
+                        true
+                    }
+                    KeyCode::Enter => {
+                        if let Some((id, _)) = w.model_list.get(w.sel).cloned() {
+                            w.model = Some(id);
+                            w.step = WizStep::Thinking;
+                            w.sel = w
+                                .thinking
+                                .as_ref()
+                                .and_then(|t| {
+                                    THINKING_LEVELS
+                                        .iter()
+                                        .position(|l| *l == t.as_str())
+                                })
+                                .unwrap_or(3); // default: medium
+                        }
+                        true
+                    }
+                    KeyCode::Esc => {
+                        w.step = WizStep::Name;
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            WizStep::Thinking => match key.code {
+                KeyCode::Up => {
+                    w.sel = w.sel.saturating_sub(1);
+                    true
+                }
+                KeyCode::Down => {
+                    w.sel = (w.sel + 1).min(THINKING_LEVELS.len() - 1);
+                    true
+                }
+                KeyCode::Enter => {
+                    w.thinking = Some(THINKING_LEVELS[w.sel].to_string());
+                    w.step = WizStep::Face;
+                    w.sel = 0;
+                    true
+                }
+                KeyCode::Esc => {
+                        w.step = WizStep::Model;
+                        true
+                    }
+                _ => false,
+            },
+            WizStep::Face => match key.code {
+                KeyCode::Up => {
+                    w.sel = w.sel.saturating_sub(1);
+                    true
+                }
+                KeyCode::Down => {
+                    w.sel = (w.sel + 1).min(FACE_PRESETS.len() - 1);
+                    true
+                }
+                KeyCode::Enter => {
+                    w.face = Some(FACE_PRESETS[w.sel].1.join("\n"));
+                    w.step = WizStep::Prompt;
+                    true
+                }
+                KeyCode::Esc => {
+                    w.step = WizStep::Thinking;
+                    true
+                }
+                _ => false,
+            },
+            WizStep::Prompt => {
+                let buf = &mut w.prompt;
+                let done = match key.code {
+                    KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                        buf.insert(0, String::new());
+                        false
+                    }
+                    KeyCode::Enter => true,
+                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        buf[0].push(c);
+                        false
+                    }
+                    KeyCode::Backspace => {
+                        if buf[0].is_empty() && buf.len() > 1 {
+                            buf.remove(0);
+                        } else {
+                            buf[0].pop();
+                        }
+                        false
+                    }
+                    _ => false,
+                };
+                if done {
+                    self.finish_wizard_pending = true;
+                }
+                true
+            }
+        }
+    }
+
+    async fn flush_wizard(&mut self) {
+        if self.finish_wizard_pending {
+            self.finish_wizard_pending = false;
+            self.finish_wizard().await;
+        }
+    }
+
+    // ---------------- key handling (synchronous) ----------------
 
     pub fn on_key(&mut self, key: KeyEvent) {
+        if self.wizard.is_some() && self.wizard_key(key) {
+            return;
+        }
         if self.menu.is_some() && self.handle_menu_key(key) {
             return;
         }
@@ -185,8 +882,14 @@ impl App {
                     self.exiting = true;
                 }
             }
+            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.pending_action = Some(KeyAction::NextMember)
+            }
+            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.pending_action = Some(KeyAction::PrevMember)
+            }
             KeyCode::Char('t') => self.toggle_last_thinking(),
-            KeyCode::Char('?') => self.menu = Some(Menu::Help),
+            KeyCode::Char('?') => self.menu = Some(MenuItem::Help),
             KeyCode::Tab => self.complete_slash(),
             KeyCode::Up => self.history_prev(),
             KeyCode::Down => self.history_next(),
@@ -227,22 +930,39 @@ impl App {
         }
     }
 
-    /// Execute the queued key action (async: may send to pi).
+    /// Execute the queued key action (async: may talk to pi).
     pub async fn flush_action(&mut self) {
-        let action = self.pending_action.take();
-        match action {
+        self.flush_wizard().await;
+        match self.pending_action.take() {
             Some(KeyAction::Enter) => self.do_enter().await,
             Some(KeyAction::Esc) => self.do_esc().await,
             Some(KeyAction::PickModel(id)) => {
-                if let Some(c) = self.client.as_mut() {
-                    c.send(CmdKind::SetModel, json!({ "type": "set_model", "model": id })).await;
+                if let Some(m) = self.active_mut() {
+                    if let Some(c) = m.client.as_mut() {
+                        c.send(CmdKind::SetModel, json!({ "type": "set_model", "model": id }))
+                            .await;
+                    }
                 }
             }
-            Some(KeyAction::Quit) | Some(KeyAction::None) | None => {}
+            Some(KeyAction::NextMember) => {
+                self.switch_member(1);
+                self.ensure_active_member().await;
+            }
+            Some(KeyAction::PrevMember) => {
+                self.switch_member(-1);
+                self.ensure_active_member().await;
+            }
+            Some(KeyAction::NewMember) => self.open_wizard(true, None),
+            Some(KeyAction::EditMember) => self.open_wizard(false, Some(self.active)),
+            _ => {}
         }
     }
 
     async fn do_enter(&mut self) {
+        if self.members.is_empty() {
+            self.open_wizard(true, None);
+            return;
+        }
         let text = self.input.join("\n");
         if text.trim().is_empty() {
             return;
@@ -256,24 +976,50 @@ impl App {
         if text.starts_with('/') && Self::is_known_slash(&text) {
             self.dispatch_slash(&text).await;
         } else {
-            self.items.push(Item::User(text.clone()));
-            if self.phase == Phase::Running {
-                self.send_prompt(&text, true).await;
+            self.members[self.active].items.push(Item::User(text.clone()));
+            if self.members[self.active].phase == Phase::Running {
+                self.members[self.active].note(format!("→ steering: {text}"));
+                self.send_to_active(&text, true).await;
             } else {
-                self.phase = Phase::Running;
-                self.send_prompt(&text, false).await;
+                self.members[self.active].phase = Phase::Running;
+                self.send_to_active(&text, false).await;
+            }
+        }
+    }
+
+    async fn send_to_active(&mut self, text: &str, steering: bool) {
+        let m = self.active_mut().unwrap();
+        let mut msg = json!({ "type": "prompt", "message": text });
+        if steering {
+            msg["streamingBehavior"] = json!("steer");
+        }
+        match m.client.as_mut() {
+            Some(c) => {
+                if !c.send(CmdKind::Prompt, msg).await {
+                    m.error("pi is gone; cannot send prompt");
+                    m.phase = Phase::Idle;
+                }
+            }
+            None => {
+                m.error("member is not connected");
+                m.phase = Phase::Idle;
             }
         }
     }
 
     async fn do_esc(&mut self) {
-        if self.phase == Phase::Running {
-            // pi docs: clear_queue before abort; restore text into the editor
-            if let Some(c) = self.client.as_mut() {
-                c.send(CmdKind::ClearQueue, json!({ "type": "clear_queue" })).await;
-                c.send(CmdKind::Abort, json!({ "type": "abort" })).await;
+        let running = self
+            .active()
+            .map(|m| m.phase == Phase::Running)
+            .unwrap_or(false);
+        if running {
+            if let Some(m) = self.active_mut() {
+                if let Some(c) = m.client.as_mut() {
+                    c.send(CmdKind::ClearQueue, json!({ "type": "clear_queue" })).await;
+                    c.send(CmdKind::Abort, json!({ "type": "abort" })).await;
+                }
+                m.note("aborted · queued messages cleared");
             }
-            self.note("aborted · queued messages cleared");
         } else if self.input.iter().any(|l| !l.is_empty()) {
             self.input = vec![String::new()];
             self.cursor_line = 0;
@@ -290,60 +1036,61 @@ impl App {
         let mut parts = text.splitn(2, ' ');
         let cmd = parts.next().unwrap_or("");
         let arg = parts.next().unwrap_or("").trim();
-        let c = match self.client.as_mut() {
-            Some(c) => c,
-            None => return,
-        };
+        let Some(m) = self.active_mut() else { return };
         match cmd {
-            "/help" => self.menu = Some(Menu::Help),
+            "/help" => self.menu = Some(MenuItem::Help),
             "/quit" | "/exit" => self.exiting = true,
+            "/new" => self.open_wizard(true, None),
+            "/edit" => self.open_wizard(false, Some(self.active)),
             "/model" => {
                 if arg.is_empty() {
-                    c.send(CmdKind::GetModels, json!({ "type": "get_available_models" })).await;
-                } else {
+                    if let Some(c) = m.client.as_mut() {
+                        c.send(CmdKind::GetModels, json!({ "type": "get_available_models" }))
+                            .await;
+                    }
+                } else if let Some(c) = m.client.as_mut() {
                     c.send(CmdKind::SetModel, json!({ "type": "set_model", "model": arg }))
                         .await;
                 }
             }
             "/think" => {
                 if arg.is_empty() {
-                    c.send(CmdKind::CycleThinking, json!({ "type": "cycle_thinking_level" })).await;
-                } else {
+                    if let Some(c) = m.client.as_mut() {
+                        c.send(CmdKind::CycleThinking, json!({ "type": "cycle_thinking_level" }))
+                            .await;
+                    }
+                } else if let Some(c) = m.client.as_mut() {
                     c.send(CmdKind::SetThinking, json!({ "type": "set_thinking_level", "level": arg }))
                         .await;
                 }
             }
             "/clear" => {
-                c.send(CmdKind::NewSession, json!({ "type": "new_session" })).await;
+                if let Some(c) = m.client.as_mut() {
+                    c.send(CmdKind::NewSession, json!({ "type": "new_session" })).await;
+                }
             }
-            "/abort" => { let _ = c.send(CmdKind::Abort, json!({ "type": "abort" })).await; }
-            "/compact" => { let _ = c.send(CmdKind::Compact, json!({ "type": "compact" })).await; }
-            "/stats" => { let _ = c.send(CmdKind::Stats, json!({ "type": "get_session_stats" })).await; }
+            "/abort" => {
+                if let Some(c) = m.client.as_mut() {
+                    c.send(CmdKind::Abort, json!({ "type": "abort" })).await;
+                }
+            }
+            "/compact" => {
+                if let Some(c) = m.client.as_mut() {
+                    c.send(CmdKind::Compact, json!({ "type": "compact" })).await;
+                }
+            }
+            "/stats" => {
+                if let Some(c) = m.client.as_mut() {
+                    c.send(CmdKind::Stats, json!({ "type": "get_session_stats" })).await;
+                }
+            }
             _ => {
-                // unknown slash command: send to pi (extension/skill/template)
-                if self.phase == Phase::Running {
-                    self.send_prompt(text, true).await;
+                if self.active().map(|m| m.phase == Phase::Running).unwrap_or(false) {
+                    self.send_to_active(text, true).await;
                 } else {
-                    self.phase = Phase::Running;
-                    self.send_prompt(text, false).await;
+                    self.active_mut().unwrap().phase = Phase::Running;
+                    self.send_to_active(text, false).await;
                 }
-            }
-        }
-    }
-
-    async fn send_prompt(&mut self, text: &str, steering: bool) {
-        let mut msg = json!({ "type": "prompt", "message": text });
-        if steering {
-            msg["streamingBehavior"] = json!("steer");
-        }
-        if let Some(c) = self.client.as_mut() {
-            if c.send(CmdKind::Prompt, msg).await {
-                if steering {
-                    self.note(format!("→ steering: {text}"));
-                }
-            } else {
-                self.error("pi is gone; cannot send prompt");
-                self.phase = Phase::Idle;
             }
         }
     }
@@ -375,7 +1122,9 @@ impl App {
     }
 
     fn delete(&mut self) {
-        if self.cursor_line + 1 < self.input.len() && self.cursor_col == self.input[self.cursor_line].chars().count() {
+        if self.cursor_line + 1 < self.input.len()
+            && self.cursor_col == self.input[self.cursor_line].chars().count()
+        {
             let next = self.input.remove(self.cursor_line + 1);
             let line = &mut self.input[self.cursor_line];
             *line = format!("{line}{next}");
@@ -422,12 +1171,13 @@ impl App {
 
     fn complete_slash(&mut self) {
         if self.input[0].starts_with('/') {
-            self.menu = Some(Menu::Slash { selected: 0 });
+            self.menu = Some(MenuItem::Slash { selected: 0 });
         }
     }
 
     fn toggle_last_thinking(&mut self) {
-        for item in self.items.iter_mut().rev() {
+        let Some(m) = self.active_mut() else { return };
+        for item in m.items.iter_mut().rev() {
             if let Item::Asst(a) = item {
                 if !a.thinking.is_empty() {
                     a.thinking_collapsed = !a.thinking_collapsed;
@@ -439,15 +1189,15 @@ impl App {
 
     fn handle_menu_key(&mut self, key: KeyEvent) -> bool {
         match &self.menu {
-            Some(Menu::Slash { selected }) => match key.code {
+            Some(MenuItem::Slash { selected }) => match key.code {
                 KeyCode::Up => {
-                    self.menu = Some(Menu::Slash {
+                    self.menu = Some(MenuItem::Slash {
                         selected: selected.saturating_sub(1),
                     });
                     true
                 }
                 KeyCode::Down => {
-                    self.menu = Some(Menu::Slash {
+                    self.menu = Some(MenuItem::Slash {
                         selected: (selected + 1).min(SLASH_COMMANDS.len() - 1),
                     });
                     true
@@ -466,16 +1216,16 @@ impl App {
                 }
                 _ => false,
             },
-            Some(Menu::Models { list, selected }) => match key.code {
+            Some(MenuItem::Models { list, selected }) => match key.code {
                 KeyCode::Up => {
-                    self.menu = Some(Menu::Models {
+                    self.menu = Some(MenuItem::Models {
                         list: list.clone(),
                         selected: selected.saturating_sub(1),
                     });
                     true
                 }
                 KeyCode::Down => {
-                    self.menu = Some(Menu::Models {
+                    self.menu = Some(MenuItem::Models {
                         list: list.clone(),
                         selected: (selected + 1).min(list.len().saturating_sub(1)),
                     });
@@ -494,332 +1244,106 @@ impl App {
                 }
                 _ => false,
             },
-            Some(Menu::Help) => matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')),
+            Some(MenuItem::Help) => matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')),
             None => false,
         }
     }
 
-    // ---------------- pi events ----------------
+    // ---------------- event loop ----------------
 
-    pub fn on_record(&mut self, rec: Rec) {
-        match rec {
-            Rec::Cmd { kind, resp } => self.on_cmd_response(kind, &resp),
-            Rec::Event(v) => {
-                if v.get("type").and_then(|t| t.as_str()) == Some("response") {
-                    // uncorrelated response (e.g. a parse error): surface failures
-                    if v.get("success").and_then(|s| s.as_bool()) == Some(false) {
-                        self.error(
-                            v.get("error")
-                                .and_then(|x| x.as_str())
-                                .unwrap_or("command failed")
-                                .to_string(),
-                        );
-                    }
-                    return;
-                }
-                self.on_event(parse_event(&v));
-            }
-            Rec::Stderr(line) => {
-                self.stderr_tail.push_back(line);
-                if self.stderr_tail.len() > 5 {
-                    self.stderr_tail.pop_front();
+    pub async fn next(&mut self, key_rx: &mut mpsc::Receiver<KeyEvent>) -> Step {
+        if let Some(w) = self.wizard.as_mut().filter(|w| w.model_pending) {
+            if let Some(rx) = self.model_list_rx.as_mut() {
+                if let Ok(list) = rx.try_recv() {
+                    w.model_list = list;
+                    w.model_pending = false;
                 }
             }
         }
+        tokio::select! {
+            k = key_rx.recv() => Step::Key(k.expect("key channel closed")),
+            r = self.rec_rx.recv() => match r {
+                Some((idx, rec)) => Step::Rec(idx, rec),
+                None => Step::Idle,
+            },
+        }
     }
 
-    fn on_cmd_response(&mut self, kind: CmdKind, resp: &serde_json::Value) {
-        let ok = resp.get("success").and_then(|x| x.as_bool()).unwrap_or(false);
-        let data = resp.get("data").cloned().unwrap_or(serde_json::Value::Null);
-        let err = || {
-            resp.get("error")
-                .and_then(|x| x.as_str())
-                .unwrap_or("command failed")
-                .to_string()
-        };
-        match kind {
-            CmdKind::Prompt => {
-                if !ok {
-                    self.phase = Phase::Idle;
-                    self.error(err());
-                } else if data
-                    .get("disposition")
-                    .and_then(|x| x.as_str())
-                    .is_some_and(|d| d == "handled")
+    pub fn on_record(&mut self, idx: usize, rec: Rec) {
+        if let Rec::Cmd { kind: CmdKind::GetModels, resp } = &rec {
+            let ok = resp.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+            if ok {
+                let data = resp
+                    .get("data")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                let list = extract_models(&data);
+                if list.is_empty() {
+                    if let Some(m) = self.active_mut() {
+                        m.error("no models available");
+                    }
+                } else {
+                    self.menu = Some(MenuItem::Models { list, selected: 0 });
+                }
+            } else if let Some(m) = self.active_mut() {
+                m.error(
+                    resp.get("error")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("get_available_models failed")
+                        .to_string(),
+                );
+            }
+            return;
+        }
+        if let Rec::Cmd { kind: CmdKind::ClearQueue, resp } = &rec {
+            if resp
+                .get("success")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                if let Some(texts) = resp
+                    .get("data")
+                    .and_then(|d| d.get("steering"))
+                    .and_then(|x| x.as_array())
                 {
-                    self.phase = Phase::Idle; // consumed by an extension command
-                }
-            }
-            CmdKind::GetState => {
-                if ok {
-                    self.model = data
-                        .get("model")
-                        .and_then(|m| {
-                            m.get("name")
-                                .or_else(|| m.get("id"))
-                                .and_then(|x| x.as_str())
-                                .map(|s| s.to_string())
-                        })
-                        .or_else(|| data.get("model").and_then(|x| x.as_str()).map(|s| s.to_string()));
-                    self.thinking = data
-                        .get("thinkingLevel")
-                        .and_then(|x| x.as_str())
-                        .map(|s| s.to_string());
-                    self.session_id = data
-                        .get("sessionId")
-                        .or_else(|| data.get("sessionFile"))
-                        .and_then(|x| x.as_str())
-                        .map(|s| s.to_string());
-                    self.session_name = data
-                        .get("name")
-                        .and_then(|x| x.as_str())
-                        .filter(|s| !s.is_empty())
-                        .map(|s| s.to_string());
-                    self.items
-                        .retain(|i| !matches!(i, Item::Note(n) if n.starts_with("connecting")));
-                    self.note(format!(
-                        "connected · {} · model {} · thinking {}",
-                        self.session_id
-                            .as_deref()
-                            .map(|s| {
-                                let base = s.rsplit('/').next().unwrap_or(s);
-                                base.chars().take(12).collect::<String>()
-                            })
-                            .unwrap_or_else(|| "in-memory".into()),
-                        self.model.as_deref().unwrap_or("?"),
-                        self.thinking.as_deref().unwrap_or("?"),
-                    ));
-                    self.phase = Phase::Idle;
-                } else {
-                    self.error(err());
-                }
-            }
-            CmdKind::GetModels => {
-                if ok {
-                    let list = extract_models(&data);
-                    if list.is_empty() {
-                        self.error("no models available");
-                    } else {
-                        self.menu = Some(Menu::Models { list, selected: 0 });
-                    }
-                } else {
-                    self.error(err());
-                }
-            }
-            CmdKind::SetModel => {
-                if ok {
-                    self.note(format!(
-                        "model → {}",
-                        data.get("modelId")
-                            .and_then(|x| x.as_str())
-                            .or_else(|| data.get("model").and_then(|x| x.as_str()))
-                            .unwrap_or("set")
-                    ));
-                } else {
-                    self.error(err());
-                }
-            }
-            CmdKind::SetThinking => {
-                if ok {
-                    self.note("thinking level set");
-                } else {
-                    self.error(err());
-                }
-            }
-            CmdKind::NewSession => {
-                if ok {
-                    let cancelled = data.get("cancelled").and_then(|x| x.as_bool()).unwrap_or(false);
-                    if cancelled {
-                        self.note("new session cancelled by extension");
-                    } else {
-                        self.items.retain(|i| !matches!(i, Item::Asst(_)));
-                        self.items.retain(|i| !matches!(i, Item::User(_)));
-                        self.items.retain(|i| !matches!(i, Item::Note(n) if n.starts_with("connected")));
-                        self.note("new session started");
-                    }
-                } else {
-                    self.error(err());
-                }
-            }
-            CmdKind::Abort => {
-                if ok {
-                    self.note("abort requested");
-                }
-            }
-            CmdKind::Compact => {
-                if ok {
-                    self.note("compaction requested");
-                } else {
-                    self.error(err());
-                }
-            }
-            CmdKind::Stats => {
-                if ok {
-                    self.note(format!("stats: {}", compact_json(&data)));
-                } else {
-                    self.error(err());
-                }
-            }
-            CmdKind::ClearQueue => {
-                if ok {
-                    // restore first queued steering text into the editor
-                    if let Some(texts) = data.get("steering").and_then(|x| x.as_array()) {
-                        if let Some(first) = texts.first().and_then(|x| x.as_str()) {
-                            self.input = first.split('\n').map(str::to_string).collect();
-                            self.cursor_line = self.input.len().saturating_sub(1);
-                            if let Some(last) = self.input.last() {
-                                self.cursor_col = last.chars().count();
-                            }
+                    if let Some(first) = texts.first().and_then(|x| x.as_str()) {
+                        self.input = first.split('\n').map(str::to_string).collect();
+                        self.cursor_line = self.input.len().saturating_sub(1);
+                        if let Some(last) = self.input.last() {
+                            self.cursor_col = last.chars().count();
                         }
                     }
                 }
             }
-            _ => {}
         }
-    }
-
-    pub fn on_event(&mut self, e: PiEvent) {
-        match e {
-            PiEvent::AgentStart => self.phase = Phase::Running,
-            PiEvent::AgentSettled { aborted } => {
-                self.phase = Phase::Idle;
-                if aborted {
-                    self.note("agent run aborted");
-                }
-            }
-            PiEvent::TurnEnd => {}
-            PiEvent::MessageStart { role } if role == "assistant" => {
-                self.items.push(Item::Asst(AssistMsg::new()));
-            }
-            PiEvent::MessageStart { .. } => {}
-            PiEvent::MessageUpdate { usage, ame } => {
-                if let Some(u) = usage {
-                    self.cur_usage = Some(u);
-                }
-                match ame {
-                    AmEvent::TextDelta { delta, .. } => self.append_to_last_asst(|a| a.text.push_str(&delta)),
-                    AmEvent::TextEnd { content, .. } => self.append_to_last_asst(|a| a.text = content),
-                    AmEvent::ThinkingDelta { delta, .. } => self.append_to_last_asst(|a| a.thinking.push_str(&delta)),
-                    AmEvent::ThinkingEnd { content, .. } => self.append_to_last_asst(|a| a.thinking = content),
-                    AmEvent::Error { msg } => self.error(msg),
-                    AmEvent::ToolCallStart { .. } | AmEvent::Other => {}
-                }
-            }
-            PiEvent::MessageEnd => {
-                if let Some(a) = self.last_asst_mut() {
-                    a.streaming = false;
-                }
-                if let Some(u) = self.cur_usage.take() {
-                    self.total_cost += u.cost;
-                    self.total_tokens += u.total;
-                    self.last_usage = Some(u);
-                }
-            }
-            PiEvent::ToolStart { name, args, .. } => {
-                self.append_to_last_asst(|a| {
-                    a.tools.push(ToolRow {
-                        name: name.clone(),
-                        summary: args_summary(&args),
-                        running: true,
-                        is_error: false,
-                        output: String::new(),
-                        duration_ms: None,
-                    });
-                });
-            }
-            PiEvent::ToolUpdate { partial, .. } => {
-                self.append_to_last_asst(|a| {
-                    if let Some(row) = a.tools.iter_mut().find(|t| t.running) {
-                        row.output = partial;
-                    }
-                });
-            }
-            PiEvent::ToolEnd { result, .. } => {
-                self.append_to_last_asst(|a| {
-                    if let Some(row) = a.tools.iter_mut().find(|t| t.running) {
-                        row.running = false;
-                        row.is_error = result.is_error;
-                        row.duration_ms = result.duration_ms;
-                        row.output = result.output;
-                    } else if let Some(row) = a.tools.last_mut() {
-                        row.running = false;
-                        row.is_error = result.is_error;
-                        row.duration_ms = result.duration_ms;
-                        row.output = result.output;
-                    }
-                });
-            }
-            PiEvent::QueueUpdate { steering, follow_up } => {
-                self.queue.steering = steering;
-                self.queue.follow_up = follow_up;
-            }
-            PiEvent::SessionNameChanged { name } => self.session_name = name,
-            PiEvent::ThinkingLevelChanged { level } => {
-                self.thinking = Some(level.clone());
-                self.note(format!("thinking level → {level}"));
-            }
-            PiEvent::CompactionStart { reason } => self.note(format!("compacting ({reason}) …")),
-            PiEvent::CompactionEnd { aborted, error, tokens_after } => {
-                if aborted {
-                    self.note("compaction aborted");
-                } else if let Some(err) = error {
-                    self.error(format!("compaction failed: {err}"));
-                } else {
-                    self.note(match tokens_after {
-                        Some(t) => format!("compaction done · ~{t} tokens"),
-                        None => "compaction done".to_string(),
-                    });
-                }
-            }
-            PiEvent::AutoRetryStart { attempt, max_attempts, error } => self.note(format!(
-                "retry {attempt}/{max_attempts}{}",
-                error.map(|e| format!(" ({e})")).unwrap_or_default()
-            )),
-            PiEvent::AutoRetryEnd { success, final_error } => {
-                if success {
-                    self.note("retry succeeded");
-                } else if let Some(e) = final_error {
-                    self.error(format!("retry failed: {e}"));
-                }
-            }
-            PiEvent::ExtensionError { error } => self.error(error),
-            PiEvent::Other(_) => {}
+        if self.members.get(idx).is_none() {
+            return;
         }
+        let m = self.members.get_mut(idx).unwrap();
+        m.on_record(rec);
     }
 
-    // ---------------- helpers ----------------
-
-    fn note(&mut self, text: impl Into<String>) {
-        self.items.push(Item::Note(text.into()));
-    }
-
-    pub fn error(&mut self, text: impl Into<String>) {
-        self.items.push(Item::Err(text.into()));
-    }
-
-    fn last_asst_mut(&mut self) -> Option<&mut AssistMsg> {
-        self.items.iter_mut().rev().find_map(|i| match i {
-            Item::Asst(a) => Some(a),
-            _ => None,
-        })
-    }
-
-    /// Apply `f` to the last assistant message, creating one if absent.
-    fn append_to_last_asst(&mut self, f: impl FnOnce(&mut AssistMsg)) {
-        if self.last_asst_mut().is_none() {
-            self.items.push(Item::Asst(AssistMsg::new()));
+    /// Shut down every member's pi process and persist the family.
+    pub async fn shutdown_all(mut self) {
+        for m in &mut self.members {
+            if let Some(mut c) = m.client.take() {
+                c.shutdown().await;
+            }
         }
-        if let Some(a) = self.last_asst_mut() {
-            f(a);
+        let mut fam = self.family.clone();
+        fam.active = self.active;
+        for (i, m) in self.members.iter().enumerate() {
+            if let Some(fm) = fam.member_mut(i) {
+                fm.session_id = m.session_id.clone();
+            }
         }
+        fam.save();
     }
 }
 
-fn compact_json(v: &serde_json::Value) -> String {
-    let s = v.to_string();
-    if s.len() > 200 {
-        s.chars().take(200).collect::<String>() + "…"
-    } else {
-        s
-    }
+/// One step of the event loop.
+pub enum Step {
+    Key(KeyEvent),
+    Rec(usize, Rec),
+    Idle,
 }

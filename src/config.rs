@@ -12,6 +12,7 @@ pub struct Config {
     pub session_name: Option<String>,
     pub tools: Option<String>,
     pub smoke: bool,
+    pub system_prompt: Option<String>,
 }
 
 impl Default for Config {
@@ -27,6 +28,7 @@ impl Default for Config {
             session_name: None,
             tools: None,
             smoke: false,
+            system_prompt: None,
         }
     }
 }
@@ -66,6 +68,7 @@ pub fn parse_args(args: &[String]) -> Result<Config> {
                     "--session-dir" => c.session_dir = Some(v.into()),
                     "--name" => c.session_name = Some(v.into()),
                     "--tools" => c.tools = Some(v.into()),
+                    "--system-prompt" => c.system_prompt = Some(v.into()),
                     _ => bail!("unknown flag {f} (see --help)"),
                 }
             }
@@ -92,6 +95,7 @@ Options:
   --session-dir <dir>  override session storage dir
   --name <name>        session display name
   --tools <list>       pass -t through to pi
+  --system-prompt <t>  append a system prompt to pi's default
   --smoke              non-TUI end-to-end check, then exit
   -h, --help           this help
 
@@ -101,9 +105,16 @@ Keys:
   esc          abort (while running) or clear input
   up/down      history
   tab          complete slash commands
+  ctrl+n / ctrl+p  next / previous family member
   t            toggle last thinking block
   ?            help
   ctrl+c       quit
+
+First run: a wizard sets up your first family member
+(name · model · thinking · ascii face · system prompt).
+The family is stored in ~/.config/pi-milya/family.json
+
+Slash: /model /think /new /edit /clear /abort /compact /stats /help /quit
 ",
     );
 }

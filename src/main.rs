@@ -2,6 +2,7 @@
 
 mod app;
 mod config;
+mod family;
 mod pi_client;
 mod protocol;
 mod ui;
@@ -49,6 +50,7 @@ async fn main() -> Result<()> {
 async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, cfg: &config::Config) -> Result<()> {
     let mut app = App::new(cfg.clone());
     app.start().await?;
+    terminal.draw(|f| ui::draw(f, &app))?;
 
     let (key_tx, mut key_rx) = mpsc::channel(64);
     // crossterm's poll is blocking: hop it off the async executor.
@@ -79,39 +81,35 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, cfg: &config
         let step = app.next(&mut key_rx).await;
         match step {
             app::Step::Key(k) => app.on_key(k),
-            app::Step::Rec(Some(rec)) => app.on_record(rec),
-            app::Step::Rec(None) => {
-                app.error("pi exited unexpectedly");
-                break;
-            }
+            app::Step::Rec(idx, rec) => app.on_record(idx, rec),
+            app::Step::Idle => {}
         }
         app.flush_action().await;
         if app.exiting {
             break;
         }
-        ui::draw(terminal, &app)?;
+        terminal.draw(|f| ui::draw(f, &app))?;
     }
 
-    if let Some(client) = app.client.take() {
-        client.shutdown().await;
-    }
+    app.shutdown_all().await;
     Ok(())
 }
 
 /// Non-TUI end-to-end check: spawn pi, get_state, prompt, stream, settle, exit.
 async fn smoke(cfg: &config::Config) -> Result<()> {
-    let mut client = PiClient::spawn(cfg).await?;
+    let (rec_tx, mut rec_rx) = mpsc::channel(256);
+    let mut client = PiClient::spawn(cfg, rec_tx, 0).await?;
     eprintln!("smoke: pi spawned");
     client.send(CmdKind::GetState, json!({ "type": "get_state" })).await;
 
     let mut settled = false;
 
     for _ in 0..2400 {
-        let rec = tokio::time::timeout(Duration::from_secs(60), client.next_event())
+        let rec = tokio::time::timeout(Duration::from_secs(60), rec_rx.recv())
             .await
             .map_err(|_| anyhow::anyhow!("smoke: timed out waiting for pi"))?;
         let rec = match rec {
-            Some(r) => r,
+            Some((_, r)) => r,
             None => anyhow::bail!("smoke: pi exited early"),
         };
         match rec {

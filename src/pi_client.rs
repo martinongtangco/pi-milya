@@ -1,13 +1,19 @@
-//! Pi RPC client: spawns `pi --mode rpc` and speaks JSONL over the pipes.
-//! Framing rules per docs/rpc.md: split on LF only (never on U+2028/29),
-//! correlate responses by `id`, close stdin for an orderly shutdown.
+//! Thin wrapper around a `pi --mode rpc` child process.
+//!
+//! The stdout read loop runs in a detached task that tags every record with
+//! an index (the member) and pushes it into a channel; the client itself owns
+//! stdin (for sending commands) and the child handle (for shutdown).
+//! pi stdout is JSONL, so we split on LF only (never on U+2028/U+2029).
+//! Response lines are correlated back to their command via a pending-id map.
 
 use std::collections::HashMap;
 use std::process::Stdio;
+use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Context, Result};
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufWriter};
+use tokio::process::Child;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
@@ -15,210 +21,183 @@ use crate::config::Config;
 use crate::protocol::{CmdKind, Rec};
 
 pub struct PiClient {
-    child: tokio::process::Child,
-    cmd_tx: Option<mpsc::Sender<String>>,
-    event_rx: mpsc::Receiver<Value>,
-    stderr_rx: mpsc::Receiver<String>,
-    pending: HashMap<String, CmdKind>,
-    next_id: u64,
+    child: Option<Child>,
+    stdin: Option<BufWriter<tokio::process::ChildStdin>>,
+    pending: Arc<tokio::sync::Mutex<HashMap<String, CmdKind>>>,
 }
 
 impl PiClient {
-    pub async fn spawn(cfg: &Config) -> Result<Self> {
+    /// Spawn `pi --mode rpc` and start its reader tasks.
+    pub async fn spawn(
+        cfg: &Config,
+        records: mpsc::Sender<(usize, Rec)>,
+        idx: usize,
+    ) -> Result<Self> {
         let mut cmd = Command::new(&cfg.pi_binary);
         cmd.arg("--mode").arg("rpc");
+        if let Some(model) = &cfg.model {
+            cmd.arg("--model").arg(model);
+        }
+        if let Some(thinking) = &cfg.thinking {
+            cmd.arg("--thinking").arg(thinking);
+        }
+        if let Some(prompt) = &cfg.system_prompt {
+            cmd.arg("--append-system-prompt").arg(prompt);
+        }
+        if let Some(name) = &cfg.session_name {
+            cmd.arg("--name").arg(name);
+        }
+        if let Some(dir) = &cfg.session_dir {
+            cmd.arg("--session-dir").arg(dir);
+        }
         if cfg.no_session {
             cmd.arg("--no-session");
+        } else if let Some(id) = &cfg.session_id {
+            cmd.arg("--session-id").arg(id);
         }
-        if let Some(m) = &cfg.model {
-            cmd.arg("--model").arg(m);
-        }
-        if let Some(t) = &cfg.thinking {
-            cmd.arg("--thinking").arg(t);
-        }
-        if let Some(s) = &cfg.session_id {
-            cmd.arg("--session-id").arg(s);
-        }
-        if let Some(d) = &cfg.session_dir {
-            cmd.arg("--session-dir").arg(d);
-        }
-        if let Some(n) = &cfg.session_name {
-            cmd.arg("-n").arg(n);
-        }
-        if let Some(t) = &cfg.tools {
-            cmd.arg("-t").arg(t);
-        }
-        cmd.current_dir(&cfg.cwd);
-        cmd.stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
         let mut child = cmd
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .current_dir(&cfg.cwd)
             .spawn()
-            .map_err(|e| anyhow!("failed to spawn '{}' — is pi installed? ({e})", cfg.pi_binary))?;
+            .context(format!("failed to spawn {} (is it on PATH?)", cfg.pi_binary))?;
+        let stdin = child.stdin.take().context("stdin pipe missing")?;
+        let stdout = child.stdout.take().context("stdout pipe missing")?;
+        let stderr = child.stderr.take().context("stderr pipe missing")?;
+        let pending = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
-        let stdout = child.stdout.take().expect("stdout piped");
-        let stderr = child.stderr.take().expect("stderr piped");
-        let stdin = child.stdin.take().expect("stdin piped");
-
-        let (record_tx, event_rx) = mpsc::channel(1024);
-        tokio::spawn(json_line_reader(BufReader::new(stdout), record_tx));
-
-        let (stderr_tx, stderr_rx) = mpsc::channel(64);
-        tokio::spawn(raw_line_reader(BufReader::new(stderr), stderr_tx));
-
-        let (cmd_tx, mut cmd_rx) = mpsc::channel::<String>(256);
+        // stdout: JSONL → records channel (tagged); responses correlated by id
+        let records_out = records.clone();
+        let pending_out = pending.clone();
         tokio::spawn(async move {
-            let mut stdin = stdin;
-            while let Some(line) = cmd_rx.recv().await {
-                if stdin.write_all(line.as_bytes()).await.is_err() {
+                let reader = tokio::io::BufReader::new(stdout);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let Some(v) = serde_json::from_str::<Value>(line).ok() else {
+                    continue;
+                };
+                let rec = if v.get("type").and_then(|t| t.as_str()) == Some("response") {
+                    let id = v
+                        .get("id")
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.to_string());
+                    let kind = match id {
+                        Some(id) => {
+                            let mut map = pending_out.lock().await;
+                            map.remove(&id)
+                        }
+                        None => None,
+                    };
+                    match kind {
+                        Some(kind) => Rec::Cmd { kind, resp: v },
+                        None => Rec::Event(v), // response w/o known id → generic
+                    }
+                } else {
+                    Rec::Event(v)
+                };
+                if records_out.send((idx, rec)).await.is_err() {
                     break;
                 }
-                if stdin.write_all(b"\n").await.is_err() {
-                    break;
-                }
-                let _ = stdin.flush().await;
             }
-            // channel dropped -> close stdin: orderly pi shutdown
-            let _ = stdin.shutdown().await;
+        });
+
+        // stderr: lines → records channel
+        tokio::spawn(async move {
+            let reader = tokio::io::BufReader::new(stderr);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if records.send((idx, Rec::Stderr(line))).await.is_err() {
+                    break;
+                }
+            }
         });
 
         Ok(Self {
-            child,
-            cmd_tx: Some(cmd_tx),
-            event_rx,
-            stderr_rx,
-            pending: HashMap::new(),
-            next_id: 0,
+            child: Some(child),
+            stdin: Some(BufWriter::new(stdin)),
+            pending,
         })
     }
 
-    /// Queue a command. Its response arrives later as `Rec::Cmd`.
-    pub async fn send(&mut self, kind: CmdKind, obj: Value) -> bool {
-        match &self.cmd_tx {
-            Some(tx) => {
-                self.next_id += 1;
-                let id = format!("milya-{}", self.next_id);
-                let mut v = obj;
-                v["id"] = json!(id);
-                self.pending.insert(id, kind);
-                tx.send(v.to_string()).await.is_ok()
-            }
-            None => false,
+    /// Send a command. Returns false when the stdin write fails.
+    pub async fn send(&mut self, kind: CmdKind, value: Value) -> bool {
+        let id = uuid_v4();
+        let mut v = value;
+        v["id"] = json!(id);
+        {
+            let mut map = self.pending.lock().await;
+            map.insert(id, kind);
         }
-    }
-
-    /// Next stdout record, demultiplexed: responses are tagged with their
-    /// `CmdKind`, everything else is a session event.
-    pub async fn next_event(&mut self) -> Option<Rec> {
-        loop {
-            let rec = self.event_rx.recv().await?;
-            if rec.get("type").and_then(|v| v.as_str()) == Some("response") {
-                if let Some(id) = rec.get("id").and_then(|v| v.as_str()) {
-                    if let Some(kind) = self.pending.remove(id) {
-                        return Some(Rec::Cmd { kind, resp: rec });
-                    }
-                }
-                // uncorrelated response (e.g. a parse error) -> treat as event
-            }
-            return Some(Rec::Event(rec));
-        }
-    }
-
-    pub async fn next_stderr(&mut self) -> Option<String> {
-        self.stderr_rx.recv().await
-    }
-
-    pub async fn wait_exit(&mut self) -> Option<i32> {
-        self.child.wait().await.ok().map(|s| s.code().unwrap_or(-1))
-    }
-
-    /// Next protocol record of any kind (events, command responses, stderr).
-    pub async fn next(&mut self) -> Option<Rec> {
-        loop {
-            tokio::select! {
-                rec = self.event_rx.recv() => {
-                    let rec = rec?;
-                    if rec.get("type").and_then(|v| v.as_str()) == Some("response") {
-                        if let Some(id) = rec.get("id").and_then(|v| v.as_str()) {
-                            if let Some(kind) = self.pending.remove(id) {
-                                return Some(Rec::Cmd { kind, resp: rec });
+        if let Some(w) = self.stdin.as_mut() {
+            match serde_json::to_string(&v) {
+                Ok(mut bytes) => {
+                    bytes.push('\n');
+                    let wr = w.write_all(bytes.as_bytes()).await;
+                    match wr {
+                        Ok(()) => match w.flush().await {
+                            Ok(()) => true,
+                            Err(e) => {
+                                false
                             }
+                        },
+                        Err(e) => {
+                            false
                         }
-                        // uncorrelated response (e.g. a parse error) -> event
-                        return Some(Rec::Event(rec));
                     }
-                    return Some(Rec::Event(rec));
                 }
-                s = self.stderr_rx.recv() => return s.map(Rec::Stderr),
+                Err(_) => false,
             }
+        } else {
+            false
         }
     }
 
-    /// Close stdin (orderly shutdown) and wait for pi to exit.
-    pub async fn shutdown(mut self) {
-        self.cmd_tx.take();
-        let _ = self.child.wait().await;
-    }
-}
-
-/// Read pi's stdout as JSONL. Split on LF only; a preceding CR is stripped.
-async fn json_line_reader(mut reader: BufReader<impl AsyncRead + Unpin>, tx: mpsc::Sender<Value>) {
-    let mut buf = Vec::new();
-    loop {
-        buf.clear();
-        match reader.read_until(b'\n', &mut buf).await {
-            Ok(0) => break,
-            Ok(_) => {
-                let mut s = String::from_utf8_lossy(&buf).into_owned();
-                if s.ends_with('\n') {
-                    s.pop();
-                }
-                if s.ends_with('\r') {
-                    s.pop();
-                }
-                if s.trim().is_empty() {
-                    continue;
-                }
-                match serde_json::from_str::<Value>(&s) {
-                    Ok(v) => {
-                        if tx.send(v).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(e) => eprintln!("[pi-milya] malformed record ({e}): {s}"),
-                }
-            }
-            Err(e) => {
-                eprintln!("[pi-milya] stdout read error: {e}");
-                break;
-            }
+    /// Orderly shutdown: close stdin, then kill if needed.
+    pub async fn shutdown(&mut self) {
+        if let Some(w) = self.stdin.as_mut() {
+            let _ = w.flush().await;
+        }
+        self.stdin = None;
+        if let Some(c) = self.child.as_mut() {
+            let _ = c.kill().await;
+            let _ = c.wait().await;
         }
     }
 }
 
-async fn raw_line_reader(mut reader: BufReader<impl AsyncRead + Unpin>, tx: mpsc::Sender<String>) {
-    let mut buf = Vec::new();
-    loop {
-        buf.clear();
-        match reader.read_until(b'\n', &mut buf).await {
-            Ok(0) => break,
-            Ok(_) => {
-                let mut s = String::from_utf8_lossy(&buf).into_owned();
-                if s.ends_with('\n') {
-                    s.pop();
-                }
-                if s.ends_with('\r') {
-                    s.pop();
-                }
-                if s.trim().is_empty() {
-                    continue;
-                }
-                if tx.send(s).await.is_err() {
-                    break;
-                }
-            }
-            Err(_) => break,
+/// Tiny v4 UUID (no dependency needed).
+fn uuid_v4() -> String {
+    let mut b = [0u8; 16];
+    let mut filled = false;
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        use std::io::Read;
+        if f.read_exact(&mut b).is_ok() {
+            filled = true;
         }
     }
+    if !filled {
+        // fallback: mix of time + counter
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let c = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut mix = t;
+        for i in 0..16 {
+            b[i] = ((mix >> ((i % 8) * 8)) & 0xff) as u8 ^ (i as u8).wrapping_mul(31);
+            mix = mix.wrapping_mul(6364136223847).wrapping_add(1442695040888963407);
+        }
+    }
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]
+    )
 }
