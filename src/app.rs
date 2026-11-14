@@ -40,18 +40,35 @@ pub enum KeyAction {
 }
 
 pub enum Item {
-    User(String),
+    User { text: String, at: i64 },
     Asst(AssistMsg),
     Note(String),
     Err(String),
+}
+
+/// Unix seconds, now (cheap, no allocation).
+pub fn now_ts() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// `16:42` local time from unix seconds.
+pub fn fmt_hm(ts: i64) -> String {
+    let s = ts.rem_euclid(86400) as u32;
+    format!("{:02}:{:02}", s / 3600, (s % 3600) / 60)
 }
 
 pub struct AssistMsg {
     pub text: String,
     pub thinking: String,
     pub thinking_collapsed: bool,
+    /// GUI: user-expanded thinking block (independent of the TUI's `t` toggle).
+    pub thinking_open: bool,
     pub tools: Vec<ToolRow>,
     pub streaming: bool,
+    pub at: i64,
 }
 
 impl AssistMsg {
@@ -60,8 +77,10 @@ impl AssistMsg {
             text: String::new(),
             thinking: String::new(),
             thinking_collapsed: true,
+            thinking_open: false,
             tools: Vec::new(),
             streaming: true,
+            at: now_ts(),
         }
     }
 }
@@ -236,7 +255,7 @@ impl MemberState {
                         self.note("new session cancelled by extension");
                     } else {
                         self.items.retain(|i| !matches!(i, Item::Asst(_)));
-                        self.items.retain(|i| !matches!(i, Item::User(_)));
+                        self.items.retain(|i| !matches!(i, Item::User { .. }));
                         self.note("new session started");
                     }
                 } else {
@@ -976,7 +995,10 @@ impl App {
         if text.starts_with('/') && Self::is_known_slash(&text) {
             self.dispatch_slash(&text).await;
         } else {
-            self.members[self.active].items.push(Item::User(text.clone()));
+            self.members[self.active].items.push(Item::User {
+                text: text.clone(),
+                at: now_ts(),
+            });
             if self.members[self.active].phase == Phase::Running {
                 self.members[self.active].note(format!("→ steering: {text}"));
                 self.send_to_active(&text, true).await;

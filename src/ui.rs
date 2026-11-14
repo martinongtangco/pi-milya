@@ -145,12 +145,21 @@ fn draw_scrollback(f: &mut ratatui::Frame, _app: &App, m: &pi_milya::app::Member
     for item in m.items.iter() {
         let mut item_lines: Vec<Line> = Vec::new();
         match item {
-            Item::User(t) => {
+            Item::User { text: t, at } => {
                 for l in t.lines() {
-                    item_lines.push(Line::from(vec![
+                    let mut spans = vec![
                         Span::styled("you> ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                        Span::raw(l.to_string()),
-                    ]));
+                        Span::styled(
+                            format!("{} ", pi_milya::app::fmt_hm(*at)),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ];
+                    if l.is_empty() && spans.len() == 2 {
+                        spans.push(Span::raw(String::new()));
+                    } else {
+                        spans.push(Span::raw(l.to_string()));
+                    }
+                    item_lines.push(Line::from(spans));
                 }
             }
             Item::Asst(a) => {

@@ -24,21 +24,98 @@ use pi_milya::protocol::{
 };
 use tokio::sync::mpsc as tokio_mpsc;
 
-const COL_USER: Color32 = Color32::from_rgb(120, 200, 255);
-const COL_OK: Color32 = Color32::from_rgb(90, 220, 120);
-const COL_WARN: Color32 = Color32::from_rgb(255, 200, 60);
-const COL_ERR: Color32 = Color32::from_rgb(255, 100, 100);
-const COL_DIM: Color32 = Color32::from_rgb(140, 140, 140);
-const COL_FACE: Color32 = Color32::from_rgb(120, 230, 140);
-const COL_CONNECT: Color32 = Color32::from_rgb(180, 120, 255);
+/// Grok-flavoured dark palette + Teams-flavoured layout constants.
+mod theme {
+    pub const BG: eframe::egui::Color32 = eframe::egui::Color32::from_rgb(13, 13, 13);
+    pub const PANEL: eframe::egui::Color32 = eframe::egui::Color32::from_rgb(19, 19, 19);
+    pub const HOVER: eframe::egui::Color32 = eframe::egui::Color32::from_rgb(28, 28, 28);
+    pub const BORDER: eframe::egui::Color32 = eframe::egui::Color32::from_rgb(34, 34, 34);
+    pub const TEXT: eframe::egui::Color32 = eframe::egui::Color32::from_rgb(235, 235, 235);
+    pub const DIM: eframe::egui::Color32 = eframe::egui::Color32::from_rgb(150, 150, 150);
+    pub const FAINT: eframe::egui::Color32 = eframe::egui::Color32::from_rgb(95, 95, 95);
+    pub const BUBBLE: eframe::egui::Color32 = eframe::egui::Color32::from_rgb(31, 31, 31);
+    pub const ACCENT: eframe::egui::Color32 = eframe::egui::Color32::from_rgb(245, 245, 245);
+    pub const ERR: eframe::egui::Color32 = eframe::egui::Color32::from_rgb(255, 122, 122);
+    pub const THINK: eframe::egui::Color32 = eframe::egui::Color32::from_rgb(170, 160, 200);
+
+    // presence
+    pub const PRESENCE_IDLE: eframe::egui::Color32 = eframe::egui::Color32::from_rgb(90, 200, 120);
+    pub const PRESENCE_BUSY: eframe::egui::Color32 = eframe::egui::Color32::from_rgb(255, 196, 90);
+    pub const PRESENCE_CONNECT: eframe::egui::Color32 = eframe::egui::Color32::from_rgb(170, 140, 255);
+    pub const PRESENCE_OFF: eframe::egui::Color32 = eframe::egui::Color32::from_rgb(70, 70, 70);
+
+    pub const MEMBER_COLORS: [eframe::egui::Color32; 8] = [
+        eframe::egui::Color32::from_rgb(122, 197, 255),
+        eframe::egui::Color32::from_rgb(131, 216, 131),
+        eframe::egui::Color32::from_rgb(255, 196, 110),
+        eframe::egui::Color32::from_rgb(255, 140, 150),
+        eframe::egui::Color32::from_rgb(182, 152, 255),
+        eframe::egui::Color32::from_rgb(110, 220, 210),
+        eframe::egui::Color32::from_rgb(255, 170, 130),
+        eframe::egui::Color32::from_rgb(190, 190, 190),
+    ];
+
+    /// Teams-style per-member color from a stable name hash.
+    pub fn member_color(name: &str) -> eframe::egui::Color32 {
+        let h: u64 = name.bytes().fold(5381u64, |a, b| a.wrapping_mul(33).wrapping_add(b as u64));
+        MEMBER_COLORS[(h as usize) % MEMBER_COLORS.len()]
+    }
+
+    /// dark tint of a member color, for avatar discs.
+    pub fn avatar_fill(c: eframe::egui::Color32) -> eframe::egui::Color32 {
+        let [r, g, b, _] = c.to_array();
+        eframe::egui::Color32::from_rgb(r / 5, g / 5, b / 5)
+    }
+}
+
+/// eframe visuals for the Grok look: near-black, hairline borders, soft rounding.
+fn grok_visuals() -> egui::Visuals {
+    let mut v = egui::Visuals::dark();
+    v.panel_fill = theme::BG;
+    v.window_fill = theme::PANEL;
+    v.window_stroke = egui::Stroke::new(1.0_f32, theme::BORDER);
+    v.override_text_color = Some(theme::TEXT);
+    v.faint_bg_color = theme::BORDER;
+    v.hyperlink_color = theme::ACCENT;
+    v.error_fg_color = theme::ERR;
+    v.code_bg_color = Color32::from_rgb(22, 22, 25);
+    // inactive widgets
+    v.widgets.inactive.bg_fill = theme::PANEL;
+    v.widgets.inactive.weak_bg_fill = theme::PANEL;
+    v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, theme::BORDER);
+    v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, theme::DIM);
+    v.widgets.inactive.rounding = egui::Rounding::same(8.0);
+    // hovered
+    v.widgets.hovered.bg_fill = theme::HOVER;
+    v.widgets.hovered.weak_bg_fill = theme::HOVER;
+    v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, theme::BORDER);
+    v.widgets.hovered.fg_stroke = egui::Stroke::new(1.0_f32, theme::TEXT);
+    // active
+    v.widgets.active.bg_fill = theme::BUBBLE;
+    v.widgets.active.weak_bg_fill = theme::BUBBLE;
+    v.widgets.active.bg_stroke = egui::Stroke::new(1.0_f32, theme::BORDER);
+    v.widgets.active.fg_stroke = egui::Stroke::new(1.0_f32, theme::TEXT);
+    // open (combo boxes)
+    v.widgets.open.weak_bg_fill = theme::HOVER;
+    // noninteractive
+    v.widgets.noninteractive.bg_fill = Color32::TRANSPARENT;
+    v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, theme::BORDER);
+    v.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, theme::FAINT);
+    // selection
+    v.selection.bg_fill = theme::BUBBLE;
+    v.selection.stroke = egui::Stroke::new(1.0_f32, theme::BORDER);
+    v
+}
 
 fn new_assist() -> AssistMsg {
     AssistMsg {
         text: String::new(),
         thinking: String::new(),
         thinking_collapsed: true,
+        thinking_open: false,
         tools: Vec::new(),
         streaming: true,
+        at: pi_milya::app::now_ts(),
     }
 }
 
@@ -217,7 +294,7 @@ impl MemberPane {
                         self.note("new session cancelled by extension");
                     } else {
                         self.items.retain(|i| !matches!(i, pi_milya::app::Item::Asst(_)));
-                        self.items.retain(|i| !matches!(i, pi_milya::app::Item::User(_)));
+                        self.items.retain(|i| !matches!(i, pi_milya::app::Item::User { .. }));
                         self.note("new session started");
                     }
                 } else {
@@ -635,7 +712,10 @@ impl GuiApp {
             .map(|m| m.phase == Phase::Running)
             .unwrap_or(false);
         if let Some(m) = self.members.get_mut(self.active) {
-            m.items.push(pi_milya::app::Item::User(text.clone()));
+            m.items.push(pi_milya::app::Item::User {
+                text: text.clone(),
+                at: pi_milya::app::now_ts(),
+            });
             if m.phase != Phase::Running {
                 m.phase = Phase::Running;
             } else {
@@ -682,7 +762,7 @@ impl eframe::App for GuiApp {
             return;
         }
 
-        ctx.set_visuals(egui::Visuals::dark());
+        ctx.set_visuals(grok_visuals());
         let title = match self.members.get(self.active) {
             Some(m) => format!(
                 "pi-milya — {} · {}",
@@ -709,212 +789,470 @@ impl eframe::App for GuiApp {
     }
 }
 
+/// per-row scratch data (immutable snapshot; keeps borrows scoped)
+struct RowData {
+    active: bool,
+    color: Color32,
+    initial: String,
+    name: String,
+    sub: String,
+    dot: Color32,
+}
+
+fn initial_of(name: &str) -> String {
+    name.chars()
+        .next()
+        .map(|c| c.to_uppercase().to_string())
+        .unwrap_or_else(|| "?".to_string())
+}
+
 impl GuiApp {
     fn draw_main(&mut self, ctx: &egui::Context, active_streaming: bool) {
-        egui::TopBottomPanel::top("title").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading("pi-milya");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add(egui::Button::new("edit member")).clicked() {
-                        self.open_wizard(false, Some(self.active));
-                    }
-                    if ui.add(egui::Button::new("new member")).clicked() {
-                        self.open_wizard(true, None);
-                    }
-                });
-            });
-        });
         egui::TopBottomPanel::bottom("input").show(ctx, |ui| {
             self.draw_input_bar(ui);
         });
-        egui::SidePanel::left("family")
+        let fam = egui::SidePanel::left("family")
             .resizable(true)
             .default_width(240.0)
-            .min_width(170.0)
+            .width_range(200.0..=240.0)
             .show(ctx, |ui| {
                 self.draw_family_sidebar(ui);
             });
-        egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = fam;
+        let cent = egui::CentralPanel::default().show(ctx, |ui| {
+            self.draw_header(ui);
             self.draw_chat(ui, active_streaming);
         });
+        let _ = cent;
     }
 
-    fn draw_family_sidebar(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("family").strong());
-        ui.separator();
-        for i in 0..self.members.len() {
-            let (text, fill, label_color) = {
-                let m = &self.members[i];
-                let active = i == self.active;
-                let dot = match m.phase {
-                    Phase::Running => "●",
-                    Phase::Connecting => "◌",
-                    Phase::Idle => "○",
-                };
-                let mut lines: Vec<String> = Vec::new();
-                for (li, fl) in m.member.face.lines().enumerate().take(3) {
-                    if li == 0 {
-                        lines.push(format!("    {dot} {fl}"));
+    /// Teams-style slim channel header: face · name · model · thinking … stats · actions
+    fn draw_header(&mut self, ui: &mut egui::Ui) {
+        let d = self.members.get(self.active).map(|m| RowData {
+            active: true,
+            color: theme::member_color(&m.member.name),
+            initial: initial_of(&m.member.name),
+            name: m.member.name.clone(),
+            sub: format!(
+                "{} · {}",
+                m.model.as_deref().unwrap_or(&m.member.model),
+                m.member.thinking
+            )
+            .chars()
+            .take(40)
+            .collect(),
+            dot: match m.phase {
+                Phase::Running => theme::PRESENCE_BUSY,
+                Phase::Connecting => theme::PRESENCE_CONNECT,
+                _ => {
+                    if m.cmd_tx.is_some() {
+                        theme::PRESENCE_IDLE
                     } else {
-                        lines.push(format!("     {fl}"));
+                        theme::PRESENCE_OFF
                     }
+                },
+            },
+        });
+        let (n, total) = (if self.members.is_empty() { 0 } else { self.active + 1 }, self.members.len());
+        let (tok, cost) = self
+            .members
+            .get(self.active)
+            .map(|m| (m.total_tokens, m.total_cost))
+            .unwrap_or((0, 0.0));
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            if let Some(d) = &d {
+                ui.label(
+                    RichText::new(format!("{}  ", d.name.chars().next().unwrap_or(' ')))
+                        .strong()
+                        .size(14.0)
+                        .color(d.color),
+                );
+                ui.label(RichText::new(&d.name).strong().size(14.0));
+                ui.add_space(10.0);
+                ui.label(RichText::new(&d.sub).small().color(theme::DIM));
+            } else {
+                ui.label(RichText::new("the family is empty").size(14.0).color(theme::DIM));
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(6.0);
+                if ui.button("edit member").clicked() {
+                    self.open_wizard(false, Some(self.active));
                 }
-                lines.push(m.member.name.clone());
-                lines.push(
-                    format!(
+                if ui.button("new member").clicked() {
+                    self.open_wizard(true, None);
+                }
+                ui.add_space(10.0);
+                ui.label(
+                    RichText::new(format!("{n}/{total} members · {tok} tokens · ${cost:.3}"))
+                        .small()
+                        .color(theme::FAINT),
+                );
+            });
+        });
+        ui.add_space(6.0);
+        ui.add(egui::Separator::default());
+    }
+
+    /// Teams-style member rail: avatar disc, name, model caption, presence dot.
+    fn draw_family_sidebar(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(RichText::new("pamilya").strong().size(13.0));
+        });
+        ui.add_space(12.0);
+        for i in 0..self.members.len() {
+            let d = { // scoped immutable read
+                let m = &self.members[i];
+                RowData {
+                    active: i == self.active,
+                    color: theme::member_color(&m.member.name),
+                    initial: initial_of(&m.member.name),
+                    name: m.member.name.clone(),
+                    sub: format!(
                         "{} · {}",
                         m.model.as_deref().unwrap_or(&m.member.model),
                         m.member.thinking
                     )
                     .chars()
-                    .take(36)
+                    .take(26)
                     .collect(),
-                );
-                let fill = if active {
-                    Color32::from_rgb(40, 60, 80)
-                } else {
-                    Color32::TRANSPARENT
-                };
-                let label_color = if active {
-                    COL_FACE
-                } else {
-                    COL_DIM
-                };
-                (lines.join("\n"), fill, label_color)
+                    dot: match m.phase {
+                        Phase::Running => theme::PRESENCE_BUSY,
+                        Phase::Connecting => theme::PRESENCE_CONNECT,
+                        _ => {
+                            if m.cmd_tx.is_some() {
+                                theme::PRESENCE_IDLE
+                            } else {
+                                theme::PRESENCE_OFF
+                            }
+                        },
+                    },
+                }
             };
-            let btn = egui::Button::new(RichText::new(text).code().color(label_color))
-                .fill(fill)
-                .min_size(egui::emath::vec2(0.0, 64.0));
-            if ui.add(btn).clicked() {
+            let (row_w, row_h) = (ui.available_width().max(140.0), 48.0);
+            let (rect, resp) =
+                ui.allocate_exact_size(egui::vec2(row_w, row_h), egui::Sense::click());
+            ui.painter().rect_filled(
+                rect,
+                10.0,
+                if d.active { theme::HOVER } else { Color32::TRANSPARENT },
+            );
+            // avatar disc, left of the row
+            let av_c = egui::pos2(rect.min.x + 8.0 + 17.0, rect.center().y);
+            ui.painter().circle_filled(av_c, 17.0, theme::avatar_fill(d.color));
+            ui.painter().text(
+                av_c,
+                egui::Align2::CENTER_CENTER,
+                d.initial.clone(),
+                egui::FontId::new(14.0, egui::FontFamily::Proportional),
+                d.color,
+            );
+            // presence dot, bottom-right of the disc
+            ui.painter().circle_filled(av_c + egui::vec2(12.0, 12.0), 5.0, d.dot);
+            // name + model caption
+            let tx = rect.min.x + 8.0 + 34.0 + 10.0;
+            ui.painter().text(
+                egui::pos2(tx, rect.min.y + 8.0),
+                egui::Align2::LEFT_TOP,
+                d.name.clone(),
+                egui::FontId::new(13.5, egui::FontFamily::Proportional),
+                if d.active { theme::TEXT } else { theme::DIM },
+            );
+            ui.painter().text(
+                egui::pos2(tx, rect.min.y + 28.0),
+                egui::Align2::LEFT_TOP,
+                d.sub.clone(),
+                egui::FontId::new(11.0, egui::FontFamily::Proportional),
+                theme::FAINT,
+            );
+            if resp.clicked() {
                 self.active = i;
                 self.save_family();
                 self.spawn_member(i);
             }
+            ui.add_space(4.0);
         }
-        ui.separator();
-        if ui.button("+ new member").clicked() {
+        ui.add_space(8.0);
+        if ui.button("+  new member").clicked() {
             self.open_wizard(true, None);
         }
     }
 
+    /// Grok-style floating input pill: one rounded frame, multiline field, round send.
     fn draw_input_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            let id = egui::Id::new("input_edit");
-            let avail = ui.available_width();
-            let input = TextEdit::multiline(&mut self.input)
-                .id(id)
-                .desired_width((avail - 340.0).max(220.0))
-                .desired_rows(2)
-                .cursor_at_end(false);
-            let _ = ui.add(input);
-            if ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift)
-                && ui.memory(|m| m.has_focus(id))
-            {
-                self.do_send();
-            }
-            ui.add(egui::Separator::default().vertical());
-            if ui.button("send").clicked() {
-                self.do_send();
-            }
-            if ui.button("abort").clicked() {
-                let is_running = self
-                    .members
-                    .get(self.active)
-                    .map(|m| m.phase == Phase::Running)
-                    .unwrap_or(false);
-                if is_running {
-                    self.send_cmd(self.active, CmdKind::ClearQueue, json!({ "type": "clear_queue" }));
-                    self.send_cmd(self.active, CmdKind::Abort, json!({ "type": "abort" }));
-                    if let Some(m) = self.members.get_mut(self.active) {
-                        m.note("aborted · queued messages cleared");
-                    }
-                }
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new("ctrl+n/p switch · ctrl+q quit").small().weak());
-            });
+        ui.set_min_height(70.0);
+        ui.horizontal_centered(|ui| {
+            egui::Frame::none()
+                .fill(theme::PANEL)
+                    .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
+                    .rounding(egui::Rounding::same(16.0))
+                    .inner_margin(egui::Margin::same(10.0))
+                    .show(ui, |ui: &mut egui::Ui| {
+                        ui.set_max_width(760.0);
+                        let id = egui::Id::new("input_edit");
+                        let input = TextEdit::multiline(&mut self.input)
+                            .id(id)
+                            .desired_width(700.0)
+                            .desired_rows(1)
+                            .frame(false);
+                        ui.add(input);
+                        if ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift)
+                            && ui.memory(|m| m.has_focus(id))
+                        {
+                            self.do_send();
+                        }
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("enter sends · shift+enter newline · ctrl+n/p switch")
+                                    .size(10.0)
+                                    .color(theme::FAINT),
+                            );
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let running = self
+                                    .members
+                                    .get(self.active)
+                                    .map(|m| m.phase == Phase::Running)
+                                    .unwrap_or(false);
+                                if running && ui.button("abort").clicked() {
+                                    self.send_cmd(
+                                        self.active,
+                                        CmdKind::ClearQueue,
+                                        json!({ "type": "clear_queue" }),
+                                    );
+                                    self.send_cmd(self.active, CmdKind::Abort, json!({ "type": "abort" }));
+                                    if let Some(m) = self.members.get_mut(self.active) {
+                                        m.note("aborted · queued messages cleared");
+                                    }
+                                }
+                                let enabled = !self.input.trim().is_empty();
+                                let send = egui::Frame::none()
+                                    .fill(if enabled { theme::ACCENT } else { theme::BUBBLE })
+                                    .rounding(egui::Rounding::same(14.0))
+                                    .inner_margin(egui::Margin::same(0.0))
+                                    .show(ui, |ui| {
+                                        ui.set_min_size(egui::vec2(28.0, 28.0));
+                                        ui.vertical_centered(|ui| {
+                                            ui.label(
+                                                RichText::new("➤")
+                                                    .strong()
+                                                    .color(if enabled {
+                                                        theme::BG
+                                                    } else {
+                                                        theme::FAINT
+                                                    }),
+                                            );
+                                        });
+                                    });
+                                if send.response.interact(egui::Sense::click()).clicked() {
+                                    self.do_send();
+                                }
+                            });
+                        });
+                    });
         });
     }
 
+    /// Teams-style message list: avatar gutter, name + timestamp, markdown body,
+    /// right-aligned user bubble, collapsible thinking, tool cards.
     fn draw_chat(&mut self, ui: &mut egui::Ui, active_streaming: bool) {
         if self.members.is_empty() {
             ui.centered_and_justified(|ui| {
-                ui.heading("the family is empty");
-                ui.label("click “new member” to meet your first one");
+                ui.add_space(80.0);
+                ui.label(RichText::new("the family is empty").size(20.0).color(theme::DIM));
+                ui.add_space(8.0);
+                ui.label(RichText::new("click “new member” to meet your first one").weak());
             });
             return;
         }
         let hash = hash_items(&self.members[self.active].items);
-        // tabs (all members, live status)
-        ui.horizontal(|ui| {
-            for i in 0..self.members.len() {
-                let (name, color, selected) = {
-                    let mm = &self.members[i];
-                    let color = match mm.phase {
-                        Phase::Running => COL_WARN,
-                        Phase::Connecting => COL_CONNECT,
-                        Phase::Idle => COL_OK,
-                    };
-                    (mm.member.name.clone(), color, i == self.active)
-                };
-                let btn = egui::Button::new(RichText::new(format!("● {name}")) .color(color))
-                    .selected(selected);
-                if ui.add(btn).clicked() {
-                    self.active = i;
-                    self.save_family();
-                    self.spawn_member(i);
-                }
-            }
-        });
-        ui.separator();
+        let mname = self.members[self.active].member.name.clone();
+        let mcolor = theme::member_color(&mname);
+        let minitial = initial_of(&mname);
         ScrollArea::both()
             .stick_to_bottom(active_streaming)
             .show(ui, |ui| {
-                for item in &self.members[self.active].items {
-                    match item {
-                        pi_milya::app::Item::User(t) => {
-                            ui.label(RichText::new(format!("you> {t}")).color(COL_USER).strong());
-                        }
-                        pi_milya::app::Item::Asst(a) => {
-                            for tl in a.thinking.lines().take(400) {
-                                ui.label(RichText::new(format!("  {tl}")).weak().small());
-                            }
-                            if !a.thinking.is_empty() {
-                                ui.label(
-                                    RichText::new(format!(
-                                        "  … {} chars of thinking",
-                                        a.thinking.chars().count()
-                                    ))
-                                    .weak(),
-                                );
-                            }
-                            for t in &a.tools {
-                                let (status, c) = if t.running {
-                                    ("…", COL_WARN)
-                                } else if t.is_error {
-                                    ("✗", COL_ERR)
-                                } else {
-                                    ("✓", COL_OK)
-                                };
+                ui.add_space(12.0);
+                let n = self.members[self.active].items.len();
+                for idx in 0..n {
+                    let toggle_thinking = {
+                        let item = &self.members[self.active].items[idx];
+                        match item {
+                            pi_milya::app::Item::User { text: t, at } => {
                                 ui.horizontal(|ui| {
-                                    ui.label(RichText::new(format!("{status} {}", t.name)).color(c));
-                                    ui.label(RichText::new(t.summary.clone()).weak().small());
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                                        egui::Frame::none()
+                                            .fill(theme::BUBBLE)
+                                                .rounding(egui::Rounding::same(14.0))
+                                                .inner_margin(egui::Margin::same(10.0))
+                                                .show(ui, |ui: &mut egui::Ui| {
+                                                    ui.set_max_width(680.0);
+                                                    ui.label(RichText::new(t.clone()).color(theme::TEXT));
+                                                    ui.horizontal(|ui| {
+                                                        ui.with_layout(
+                                                            egui::Layout::right_to_left(egui::Align::Center),
+                                                            |ui| {
+                                                                ui.label(
+                                                                    RichText::new(pi_milya::app::fmt_hm(*at))
+                                                                        .size(10.0)
+                                                                        .color(theme::FAINT),
+                                                                );
+                                                            },
+                                                        );
+                                                    });
+                                                });
+                                        ui.add_space(44.0); // avatar gutter
+                                    });
                                 });
+                                false
                             }
-                            if !a.text.is_empty() {
-                                draw_markdown(ui, &a.text);
+                            pi_milya::app::Item::Asst(a) => {
+                                let mut clicked_think = false;
+                                ui.horizontal(|ui| {
+                                    // avatar disc in a fixed gutter
+                                    let (arect, _) =
+                                        ui.allocate_exact_size(egui::vec2(44.0, 40.0), egui::Sense::hover());
+                                    let av_c = egui::pos2(
+                                        arect.min.x + 18.0,
+                                        arect.min.y + 20.0,
+                                    );
+                                    ui.painter().circle_filled(av_c, 16.0, theme::avatar_fill(mcolor));
+                                    ui.painter().text(
+                                        av_c,
+                                        egui::Align2::CENTER_CENTER,
+                                        minitial.clone(),
+                                        egui::FontId::new(13.0, egui::FontFamily::Proportional),
+                                        mcolor,
+                                    );
+                                    ui.add_space(8.0);
+                                    ui.vertical(|ui| {
+                                        ui.set_max_width(760.0);
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                RichText::new(mname.clone())
+                                                    .strong()
+                                                    .size(13.5)
+                                                    .color(mcolor),
+                                            );
+                                            ui.add_space(8.0);
+                                            ui.label(
+                                                RichText::new(pi_milya::app::fmt_hm(a.at))
+                                                    .size(10.0)
+                                                    .color(theme::FAINT),
+                                            );
+                                        });
+                                        ui.add_space(3.0);
+                                        // Grok-style collapsible thinking line
+                                        if !a.thinking.is_empty() {
+                                            let tl = ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(format!(
+                                                        "{} · thinking · {} chars",
+                                                        if a.thinking_open { "▾" } else { "▸" },
+                                                        a.thinking.chars().count()
+                                                    ))
+                                                    .small()
+                                                    .color(theme::THINK),
+                                                ),
+                                            );
+                                            clicked_think = tl.interact(egui::Sense::click()).clicked();
+                                            if a.thinking_open {
+                                                for tl2 in a.thinking.lines().take(120) {
+                                                    ui.label(
+                                                        RichText::new(tl2.to_string())
+                                                            .small()
+                                                            .color(theme::THINK),
+                                                    );
+                                                }
+                                                ui.add_space(4.0);
+                                            }
+                                        }
+                                        // tool cards (fixed-size, painter background)
+                                        for t in &a.tools {
+                                            let (status, c) = if t.running {
+                                                ("…", theme::PRESENCE_BUSY)
+                                            } else if t.is_error {
+                                                ("✕", theme::ERR)
+                                            } else {
+                                                ("✓", theme::PRESENCE_IDLE)
+                                            };
+                                            let tw = ui.available_width().min(640.0);
+                                            let (trect, _) = ui.allocate_exact_size(
+                                                egui::vec2(tw, 34.0),
+                                                egui::Sense::hover(),
+                                            );
+                                            ui.painter()
+                                                .rect_filled(trect, 8.0, Color32::from_rgb(22, 22, 25));
+                                            ui.painter()
+                                                .rect_stroke(trect, 8.0, egui::Stroke::new(1.0_f32, theme::BORDER));
+                                            let ty = trect.center().y;
+                                            ui.painter().text(
+                                                egui::pos2(trect.min.x + 10.0, ty),
+                                                egui::Align2::LEFT_CENTER,
+                                                status,
+                                                egui::FontId::new(12.0, egui::FontFamily::Proportional),
+                                                c,
+                                            );
+                                            ui.painter().text(
+                                                egui::pos2(trect.min.x + 30.0, ty),
+                                                egui::Align2::LEFT_CENTER,
+                                                t.name.clone(),
+                                                egui::FontId::new(12.0, egui::FontFamily::Monospace),
+                                                theme::DIM,
+                                            );
+                                            if let Some(d) = t.duration_ms {
+                                                ui.painter().text(
+                                                    egui::pos2(trect.max.x - 10.0, ty),
+                                                    egui::Align2::RIGHT_CENTER,
+                                                    format!("{d} ms"),
+                                                    egui::FontId::new(10.0, egui::FontFamily::Proportional),
+                                                    theme::FAINT,
+                                                );
+                                            }
+                                            ui.add_space(6.0);
+                                        }
+                                        if !a.text.is_empty() {
+                                            draw_markdown(ui, &a.text);
+                                        }
+                                        if a.streaming && a.text.is_empty() {
+                                            ui.label(RichText::new("…").color(theme::FAINT));
+                                        }
+                                    });
+                                });
+                                clicked_think
                             }
-                            if a.streaming && a.text.is_empty() {
-                                ui.label(RichText::new("pi> …").weak());
+                            pi_milya::app::Item::Note(t) => {
+                                ui.horizontal_centered(|ui| {
+                                    ui.label(RichText::new(t.clone()).size(10.0).color(theme::FAINT));
+                                });
+                                false
+                            }
+                            pi_milya::app::Item::Err(t) => {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new("!  ").color(theme::ERR).strong());
+                                    ui.label(RichText::new(t.clone()).small().color(theme::ERR));
+                                });
+                                false
                             }
                         }
-                        pi_milya::app::Item::Note(t) => {
-                            ui.label(RichText::new(t.clone()).weak());
-                        }
-                        pi_milya::app::Item::Err(t) => {
-                            ui.label(RichText::new(format!("  ! {t}")).color(COL_ERR));
+                    };
+                    if toggle_thinking {
+                        // flip this message's thinking block
+                        if let Some(mm) = self
+                            .members
+                            .get_mut(self.active)
+                            .and_then(|m| m.items.get_mut(idx))
+                        {
+                            if let pi_milya::app::Item::Asst(x) = mm {
+                                if !x.thinking.is_empty() {
+                                    x.thinking_open = !x.thinking_open;
+                                }
+                            }
                         }
                     }
+                    ui.add_space(14.0);
                 }
             });
         self.last_hash = hash;
@@ -933,7 +1271,12 @@ impl GuiApp {
         let mut saved = false;
         let mut cancelled = false;
         egui::TopBottomPanel::top("wiz_title").show(ctx, |ui| {
-            ui.heading(RichText::new(title).color(COL_USER));
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.add_space(10.0);
+                ui.label(RichText::new(title).size(18.0).color(theme::TEXT));
+            });
+            ui.add_space(6.0);
         });
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(16.0);
@@ -947,7 +1290,7 @@ impl GuiApp {
                 if w.model_pending && w.model_list.is_empty() {
                     ui.label(RichText::new("fetching models from pi …").weak());
                 } else if w.model_list.is_empty() {
-                    ui.label(RichText::new("no models available — check llamesa").color(COL_ERR));
+                    ui.label(RichText::new("no models available — check llamesa").color(theme::ERR));
                 } else {
                     let mut sel = w
                         .model
@@ -1036,7 +1379,7 @@ fn hash_items(items: &[pi_milya::app::Item]) -> u64 {
     let mut h: u64 = (items.len() as u64).wrapping_mul(0x9e3779b97f4a7c15);
     if let Some(last) = items.last() {
         let s = match last {
-            pi_milya::app::Item::User(t) => t.as_str(),
+            pi_milya::app::Item::User { text: t, .. } => t.as_str(),
             pi_milya::app::Item::Asst(a) => a.text.as_str(),
             pi_milya::app::Item::Note(t) => t.as_str(),
             pi_milya::app::Item::Err(t) => t.as_str(),
@@ -1094,7 +1437,14 @@ fn draw_markdown(ui: &mut egui::Ui, text: &str) {
                     }
                     let block = code_lines.join("\n");
                     ui.add_space(2.0);
-                    ui.label(RichText::new(format!("  {block}")).code().small());
+                    let _ = egui::Frame::none()
+                        .fill(Color32::from_rgb(22, 22, 25))
+                        .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
+                        .rounding(egui::Rounding::same(8.0))
+                        .inner_margin(egui::Margin::symmetric(10.0, 0.0))
+                        .show(ui, |ui| {
+                            ui.label(RichText::new(block).monospace().small().color(theme::DIM));
+                        });
                     ui.add_space(2.0);
                 }
                 _ => {}

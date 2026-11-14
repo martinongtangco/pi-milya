@@ -65,23 +65,33 @@ Works on Linux and Windows (eframe/winit; just needs a local `pi` — pass
 | ![](docs/screenshot-main.png) | ![](docs/screenshot-wizard.png) |
 | main view (member connected, live model name) | first-run wizard form |
 
-- **Family sidebar** (left): every member's ASCII face, name, model + thinking,
-  status dot; click to switch. All members' conversations coexist — streams
-  keep flowing in the background regardless of the open tab.
-- **Tabs + chat pane**: per-member status dots; markdown-rendered assistant
-  text (headings, code blocks, lists), full thinking transcripts, tool rows.
+- **Family rail** (left): one row per member — colored avatar disc with
+  initials, presence dot (green = idle, amber = thinking, red = error,
+  hollow = not connected), name, model caption; click to switch. All
+  members' conversations coexist — streams keep flowing in the background
+  regardless of the open tab.
+- **Header**: slim channel-style bar — active member avatar + name, live
+  model · thinking, `n/total members · tokens · cost`, `new member` /
+  `edit member` actions.
+- **Chat**: Grok-style message rows — avatar disc, colored name + timestamp,
+  collapsible `▸ · thinking · N chars` line (click to expand), quiet tool
+  cards, markdown body (headings, code blocks, lists); `you` messages are
+  right-aligned rounded bubbles with timestamps.
 - **First run / `new member` / `edit member`**: a real form (name, model
   combo populated live from pi, thinking level, face picker, system prompt)
   — no key-fu.
-- **Keys**: `ctrl+n` / `ctrl+p` switch members, `ctrl+q` quit; the input bar
-  sends on `enter` (shift+enter = newline) and has `send` / `abort` buttons.
+- **Input**: centered rounded pill — `Enter` sends (steers when running),
+  `Shift+Enter` newline, round send/abort button.
+- **Keys**: `ctrl+n` / `ctrl+p` switch members, `ctrl+q` quit.
 - Shares `~/.config/pi-milya/family.json` with the TUI — members, models and
   sessions are identical in both frontends.
 
 Built against eframe/egui 0.29 (single-string `RichText`, `TopBottomPanel::bottom`,
-`ComboBox::show_index`, `ViewportCommand::Close/Title`). The GUI owns a tokio
-runtime that stays alive for the whole app; pi records are bridged from the
-runtime into the egui event loop each frame.
+`ComboBox::show_index`, `ViewportCommand::Close/Title`; fixed-size allocated
+rows + painter for avatars, since `Frame`/`SidePanel` natural sizing is
+unreliable in this version). The GUI owns a tokio runtime that stays alive
+for the whole app; pi records are bridged from the runtime into the egui
+event loop each frame.
 
 ![](docs/screenshot-chat.png)
 
