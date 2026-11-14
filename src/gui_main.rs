@@ -763,6 +763,19 @@ impl eframe::App for GuiApp {
         }
 
         ctx.set_visuals(grok_visuals());
+
+        // Adaptive scale: grow fonts/margins with the window so the UI doesn't
+        // look tiny on large displays (or cramped on small ones). 900pt is the
+        // reference height. `min` (not max) guarantees the whole layout always
+        // fits inside the window — even when the reported viewport is smaller
+        // than the window (high-DPI Windows displays), so the input bar can
+        // never float above a black band. Clamped to [1.0, 2.0].
+        let size = ctx.input(|i| i.screen_rect.size());
+        let scale = (size.y / 900.0).min(size.x / 1560.0).clamp(1.0, 2.0);
+        if (ctx.pixels_per_point() - scale).abs() > 0.01 {
+            ctx.set_pixels_per_point(scale);
+        }
+
         let title = match self.members.get(self.active) {
             Some(m) => format!(
                 "pi-milya — {} · {}",
@@ -812,13 +825,14 @@ fn initial_of(name: &str) -> String {
 
 impl GuiApp {
     fn draw_main(&mut self, ctx: &egui::Context, active_streaming: bool) {
-        egui::TopBottomPanel::bottom("input").show(ctx, |ui| {
+        let resp = egui::TopBottomPanel::bottom("input").show(ctx, |ui| {
             self.draw_input_bar(ui);
         });
+        let _ = resp;
         let fam = egui::SidePanel::left("family")
             .resizable(true)
-            .default_width(240.0)
-            .width_range(200.0..=240.0)
+            .default_width(260.0)
+            .width_range(180.0..=480.0)
             .show(ctx, |ui| {
                 self.draw_family_sidebar(ui);
             });
@@ -987,75 +1001,89 @@ impl GuiApp {
 
     /// Grok-style floating input pill: one rounded frame, multiline field, round send.
     fn draw_input_bar(&mut self, ui: &mut egui::Ui) {
-        ui.set_min_height(70.0);
+        // The send/abort row lives in a `with_layout` sub-ui whose min-size is
+        // not propagated to the parent, so the panel must pin its own height
+        // (in points — the adaptive pixels_per_point scales it for big displays).
+        ui.set_min_height(74.0);
+        // Responsive: bar spans most of the panel (capped so it doesn't get
+        // absurdly wide on huge displays), centered. All inner widths are
+        // derived from the actual available space — nothing fixed at 760px.
+        let bar_w = ui.available_width().clamp(520.0, 1200.0);
         ui.horizontal_centered(|ui| {
             egui::Frame::none()
                 .fill(theme::PANEL)
-                    .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
-                    .rounding(egui::Rounding::same(16.0))
-                    .inner_margin(egui::Margin::same(10.0))
-                    .show(ui, |ui: &mut egui::Ui| {
-                        ui.set_max_width(760.0);
-                        let id = egui::Id::new("input_edit");
-                        let input = TextEdit::multiline(&mut self.input)
-                            .id(id)
-                            .desired_width(700.0)
-                            .desired_rows(1)
-                            .frame(false);
-                        ui.add(input);
-                        if ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift)
-                            && ui.memory(|m| m.has_focus(id))
-                        {
-                            self.do_send();
-                        }
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new("enter sends · shift+enter newline · ctrl+n/p switch")
-                                    .size(10.0)
-                                    .color(theme::FAINT),
-                            );
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                let running = self
-                                    .members
-                                    .get(self.active)
-                                    .map(|m| m.phase == Phase::Running)
-                                    .unwrap_or(false);
-                                if running && ui.button("abort").clicked() {
-                                    self.send_cmd(
-                                        self.active,
-                                        CmdKind::ClearQueue,
-                                        json!({ "type": "clear_queue" }),
-                                    );
-                                    self.send_cmd(self.active, CmdKind::Abort, json!({ "type": "abort" }));
-                                    if let Some(m) = self.members.get_mut(self.active) {
-                                        m.note("aborted · queued messages cleared");
-                                    }
+                .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
+                .rounding(egui::Rounding::same(16.0))
+                .inner_margin(egui::Margin::same(12.0))
+                .show(ui, |ui: &mut egui::Ui| {
+                    ui.set_max_width(bar_w - 24.0);
+                    let id = egui::Id::new("input_edit");
+                    let avail = ui.available_width();
+                    // Reserve room for the send button (+abort when running) so
+                    // the editor never collides with the controls below it.
+                    let edit_w = (avail - 48.0).max(140.0);
+                    let input = TextEdit::multiline(&mut self.input)
+                        .id(id)
+                        .desired_width(edit_w)
+                        .desired_rows(1)
+                        .frame(false);
+                    ui.add(input);
+                    if ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift)
+                        && ui.memory(|m| m.has_focus(id))
+                    {
+                        self.do_send();
+                    }
+                    // Second row: hint left, actions right (egui's documented
+                    // idiom: label first, then a right_to_left block which pins
+                    // its items to the right edge — no overlap at any size).
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("enter sends · shift+enter newline · ctrl+n/p switch")
+                                .size(11.0)
+                                .color(theme::FAINT),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let running = self
+                                .members
+                                .get(self.active)
+                                .map(|m| m.phase == Phase::Running)
+                                .unwrap_or(false);
+                            if running && ui.button("abort").clicked() {
+                                self.send_cmd(
+                                    self.active,
+                                    CmdKind::ClearQueue,
+                                    json!({ "type": "clear_queue" }),
+                                );
+                                self.send_cmd(self.active, CmdKind::Abort, json!({ "type": "abort" }));
+                                if let Some(m) = self.members.get_mut(self.active) {
+                                    m.note("aborted · queued messages cleared");
                                 }
-                                let enabled = !self.input.trim().is_empty();
-                                let send = egui::Frame::none()
-                                    .fill(if enabled { theme::ACCENT } else { theme::BUBBLE })
-                                    .rounding(egui::Rounding::same(14.0))
-                                    .inner_margin(egui::Margin::same(0.0))
-                                    .show(ui, |ui| {
-                                        ui.set_min_size(egui::vec2(28.0, 28.0));
-                                        ui.vertical_centered(|ui| {
-                                            ui.label(
-                                                RichText::new("➤")
-                                                    .strong()
-                                                    .color(if enabled {
-                                                        theme::BG
-                                                    } else {
-                                                        theme::FAINT
-                                                    }),
-                                            );
-                                        });
+                            }
+                            let enabled = !self.input.trim().is_empty();
+                            let send = egui::Frame::none()
+                                .fill(if enabled { theme::ACCENT } else { theme::BUBBLE })
+                                .rounding(egui::Rounding::same(14.0))
+                                .inner_margin(egui::Margin::same(0.0))
+                                .show(ui, |ui| {
+                                    ui.set_min_size(egui::vec2(30.0, 30.0));
+                                    ui.vertical_centered(|ui| {
+                                        ui.label(
+                                            RichText::new("➤")
+                                                .strong()
+                                                .color(if enabled {
+                                                    theme::BG
+                                                } else {
+                                                    theme::FAINT
+                                                }),
+                                        );
                                     });
-                                if send.response.interact(egui::Sense::click()).clicked() {
-                                    self.do_send();
-                                }
-                            });
+                                });
+                            if send.response.interact(egui::Sense::click()).clicked() {
+                                self.do_send();
+                            }
                         });
                     });
+                });
         });
     }
 
@@ -1284,7 +1312,10 @@ impl GuiApp {
             ui.add_space(16.0);
             ui.horizontal(|ui| {
                 ui.label("name");
-                ui.add(egui::TextEdit::singleline(&mut w.name).desired_width(240.0));
+                ui.add(
+                    egui::TextEdit::singleline(&mut w.name)
+                        .desired_width(ui.available_width().min(420.0)),
+                );
             });
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -1353,7 +1384,7 @@ impl GuiApp {
             ui.label("system prompt (appended to pi's prompt; empty is fine)");
             ui.add(
                 TextEdit::multiline(&mut w.prompt)
-                    .desired_width(520.0)
+                    .desired_width(ui.available_width().min(640.0))
                     .desired_rows(4),
             );
             ui.add_space(16.0);
