@@ -144,11 +144,13 @@ async fn smoke(cfg: &config::Config) -> Result<()> {
             Rec::Cmd { .. } => {}
             Rec::Event(v) => {
                 let e = pi_milya::protocol::parse_event(&v);
-                if let PiEvent::MessageUpdate { ame, .. } = &e {
-                    if let AmEvent::TextDelta { delta, .. } = ame {
-                        print!("{delta}");
-                        io::stdout().flush().ok();
-                    }
+                if let PiEvent::MessageUpdate {
+                    ame: AmEvent::TextDelta { delta, .. },
+                    ..
+                } = &e
+                {
+                    print!("{delta}");
+                    io::stdout().flush().ok();
                 }
                 if matches!(e, PiEvent::AgentSettled { .. }) {
                     settled = true;

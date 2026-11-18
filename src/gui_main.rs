@@ -260,11 +260,10 @@ impl MemberPane {
                         .get("sessionId")
                         .and_then(|x| x.as_str())
                         .map(|s| s.to_string())
+                        && Some(sid.clone()) != self.session_id
                     {
-                        if Some(sid.clone()) != self.session_id {
-                            self.session_id = Some(sid.clone());
-                            self.member.session_id = Some(sid);
-                        }
+                        self.session_id = Some(sid.clone());
+                        self.member.session_id = Some(sid);
                     }
                     self.items.retain(
                         |i| !matches!(i, pi_milya::app::Item::Note(n) if n.starts_with("…")),
@@ -543,13 +542,8 @@ impl GuiApp {
             client
                 .send(CmdKind::GetState, json!({ "type": "get_state" }))
                 .await;
-            loop {
-                match cmd_rx.recv().await {
-                    Some((kind, value)) => {
-                        let _ = client.send(kind, value).await;
-                    }
-                    None => break,
-                }
+            while let Some((kind, value)) = cmd_rx.recv().await {
+                let _ = client.send(kind, value).await;
             }
             client.shutdown().await;
         });
@@ -604,14 +598,14 @@ impl GuiApp {
             prompt: String::new(),
             save_err: String::new(),
         };
-        if let Some(idx) = editing_idx {
-            if let Some(m) = self.members.get(idx) {
-                w.name = m.member.name.clone();
-                w.model = Some(m.member.model.clone());
-                w.thinking = m.member.thinking.clone();
-                w.face = m.member.face.clone();
-                w.prompt = m.member.system_prompt.clone().unwrap_or_default();
-            }
+        if let Some(idx) = editing_idx
+            && let Some(m) = self.members.get(idx)
+        {
+            w.name = m.member.name.clone();
+            w.model = Some(m.member.model.clone());
+            w.thinking = m.member.thinking.clone();
+            w.face = m.member.face.clone();
+            w.prompt = m.member.system_prompt.clone().unwrap_or_default();
         }
         let base = self.base_cfg.clone();
         let (tx, rx) = std_mpsc::channel();
@@ -683,7 +677,7 @@ impl GuiApp {
                     m.member.thinking = w.thinking;
                     m.member.system_prompt = prompt;
                     m.cmd_tx = None; // old task exits → shuts down its client
-                    m.note(format!("— restarting with new config —"));
+                    m.note("— restarting with new config —");
                 }
                 self.spawn_member(idx);
                 if let Some(m) = self.members.get_mut(idx) {
@@ -724,13 +718,12 @@ impl GuiApp {
                 }
             }
         }
-        if let Some(rx) = self.model_list_rx.as_mut() {
-            if let Ok(list) = rx.try_recv() {
-                if let Some(w) = self.wizard.as_mut() {
-                    w.model_list = list;
-                    w.model_pending = false;
-                }
-            }
+        if let Some(rx) = self.model_list_rx.as_mut()
+            && let Ok(list) = rx.try_recv()
+            && let Some(w) = self.wizard.as_mut()
+        {
+            w.model_list = list;
+            w.model_pending = false;
         }
         changed
     }
@@ -1358,19 +1351,15 @@ impl GuiApp {
                             }
                         }
                     };
-                    if toggle_thinking {
-                        // flip this message's thinking block
-                        if let Some(mm) = self
+                    // flip this message's thinking block
+                    if toggle_thinking
+                        && let Some(pi_milya::app::Item::Asst(x)) = self
                             .members
                             .get_mut(self.active)
                             .and_then(|m| m.items.get_mut(idx))
-                        {
-                            if let pi_milya::app::Item::Asst(x) = mm {
-                                if !x.thinking.is_empty() {
-                                    x.thinking_open = !x.thinking_open;
-                                }
-                            }
-                        }
+                        && !x.thinking.is_empty()
+                    {
+                        x.thinking_open = !x.thinking_open;
                     }
                     ui.add_space(14.0);
                 }
@@ -1588,7 +1577,7 @@ fn draw_markdown(ui: &mut egui::Ui, text: &str) {
                         code_line.push_str(line);
                     }
                 } else {
-                    para.push_str(&t.to_string());
+                    para.push_str(&t);
                 }
             }
             Event::Code(t) => {
