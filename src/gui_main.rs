@@ -17,10 +17,10 @@ use serde_json::json;
 
 use pi_milya::app::{AssistMsg, Phase, ToolRow};
 use pi_milya::config::{self, Config};
-use pi_milya::family::{self, Family, Member, FACE_PRESETS, THINKING_LEVELS};
+use pi_milya::family::{self, FACE_PRESETS, Family, Member, THINKING_LEVELS};
 use pi_milya::pi_client::PiClient;
 use pi_milya::protocol::{
-    args_summary, extract_models, parse_event, AmEvent, CmdKind, PiEvent, Rec,
+    AmEvent, CmdKind, PiEvent, Rec, args_summary, extract_models, parse_event,
 };
 use tokio::sync::mpsc as tokio_mpsc;
 
@@ -41,7 +41,8 @@ mod theme {
     // presence
     pub const PRESENCE_IDLE: eframe::egui::Color32 = eframe::egui::Color32::from_rgb(90, 200, 120);
     pub const PRESENCE_BUSY: eframe::egui::Color32 = eframe::egui::Color32::from_rgb(255, 196, 90);
-    pub const PRESENCE_CONNECT: eframe::egui::Color32 = eframe::egui::Color32::from_rgb(170, 140, 255);
+    pub const PRESENCE_CONNECT: eframe::egui::Color32 =
+        eframe::egui::Color32::from_rgb(170, 140, 255);
     pub const PRESENCE_OFF: eframe::egui::Color32 = eframe::egui::Color32::from_rgb(70, 70, 70);
 
     pub const MEMBER_COLORS: [eframe::egui::Color32; 8] = [
@@ -57,7 +58,9 @@ mod theme {
 
     /// Teams-style per-member color from a stable name hash.
     pub fn member_color(name: &str) -> eframe::egui::Color32 {
-        let h: u64 = name.bytes().fold(5381u64, |a, b| a.wrapping_mul(33).wrapping_add(b as u64));
+        let h: u64 = name
+            .bytes()
+            .fold(5381u64, |a, b| a.wrapping_mul(33).wrapping_add(b as u64));
         MEMBER_COLORS[(h as usize) % MEMBER_COLORS.len()]
     }
 
@@ -169,13 +172,10 @@ impl MemberPane {
     }
 
     fn last_asst_mut(&mut self) -> Option<&mut AssistMsg> {
-        self.items
-            .iter_mut()
-            .rev()
-            .find_map(|i| match i {
-                pi_milya::app::Item::Asst(a) => Some(a),
-                _ => None,
-            })
+        self.items.iter_mut().rev().find_map(|i| match i {
+            pi_milya::app::Item::Asst(a) => Some(a),
+            _ => None,
+        })
     }
 
     fn apply_to_last_asst(&mut self, f: impl FnOnce(&mut AssistMsg)) {
@@ -213,7 +213,10 @@ impl MemberPane {
     }
 
     fn apply_cmd(&mut self, kind: &CmdKind, resp: &serde_json::Value) {
-        let ok = resp.get("success").and_then(|x| x.as_bool()).unwrap_or(false);
+        let ok = resp
+            .get("success")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
         let data = resp.get("data").cloned().unwrap_or(serde_json::Value::Null);
         let err = || {
             resp.get("error")
@@ -263,8 +266,9 @@ impl MemberPane {
                             self.member.session_id = Some(sid);
                         }
                     }
-                    self.items
-                        .retain(|i| !matches!(i, pi_milya::app::Item::Note(n) if n.starts_with("…")));
+                    self.items.retain(
+                        |i| !matches!(i, pi_milya::app::Item::Note(n) if n.starts_with("…")),
+                    );
                     self.phase = Phase::Idle;
                 } else {
                     self.error(err());
@@ -293,8 +297,10 @@ impl MemberPane {
                     if cancelled {
                         self.note("new session cancelled by extension");
                     } else {
-                        self.items.retain(|i| !matches!(i, pi_milya::app::Item::Asst(_)));
-                        self.items.retain(|i| !matches!(i, pi_milya::app::Item::User { .. }));
+                        self.items
+                            .retain(|i| !matches!(i, pi_milya::app::Item::Asst(_)));
+                        self.items
+                            .retain(|i| !matches!(i, pi_milya::app::Item::User { .. }));
                         self.note("new session started");
                     }
                 } else {
@@ -344,10 +350,18 @@ impl MemberPane {
                     self.cur_usage = Some(u.clone());
                 }
                 match ame {
-                    AmEvent::TextDelta { delta, .. } => self.apply_to_last_asst(|a| a.text.push_str(delta)),
-                    AmEvent::TextEnd { content, .. } => self.apply_to_last_asst(|a| a.text = content.clone()),
-                    AmEvent::ThinkingDelta { delta, .. } => self.apply_to_last_asst(|a| a.thinking.push_str(delta)),
-                    AmEvent::ThinkingEnd { content, .. } => self.apply_to_last_asst(|a| a.thinking = content.clone()),
+                    AmEvent::TextDelta { delta, .. } => {
+                        self.apply_to_last_asst(|a| a.text.push_str(delta))
+                    }
+                    AmEvent::TextEnd { content, .. } => {
+                        self.apply_to_last_asst(|a| a.text = content.clone())
+                    }
+                    AmEvent::ThinkingDelta { delta, .. } => {
+                        self.apply_to_last_asst(|a| a.thinking.push_str(delta))
+                    }
+                    AmEvent::ThinkingEnd { content, .. } => {
+                        self.apply_to_last_asst(|a| a.thinking = content.clone())
+                    }
                     AmEvent::Error { msg } => self.error(msg.clone()),
                     AmEvent::ToolCallStart { .. } | AmEvent::Other => {}
                 }
@@ -393,7 +407,11 @@ impl MemberPane {
                 self.note(format!("thinking level → {level}"));
             }
             PiEvent::CompactionStart { reason } => self.note(format!("compacting ({reason}) …")),
-            PiEvent::CompactionEnd { aborted, error, tokens_after } => {
+            PiEvent::CompactionEnd {
+                aborted,
+                error,
+                tokens_after,
+            } => {
                 if *aborted {
                     self.note("compaction aborted");
                 } else if let Some(err) = error {
@@ -456,14 +474,19 @@ impl GuiApp {
                 }
             }
         });
-        let base_cfg = config::parse_args(&std::env::args().collect::<Vec<_>>())
-            .unwrap_or_default();
+        let base_cfg =
+            config::parse_args(&std::env::args().collect::<Vec<_>>()).unwrap_or_default();
         let mut family = Family::load().unwrap_or(Family {
             members: Vec::new(),
             active: 0,
         });
         family.clamp_active();
-        let members = family.members.iter().cloned().map(MemberPane::new).collect();
+        let members = family
+            .members
+            .iter()
+            .cloned()
+            .map(MemberPane::new)
+            .collect();
         let mut app = Self {
             base_cfg,
             family,
@@ -492,7 +515,9 @@ impl GuiApp {
 
     /// Spawn (or restart) the pi process for one member.
     fn spawn_member(&mut self, idx: usize) {
-        let Some(m) = self.members.get_mut(idx) else { return };
+        let Some(m) = self.members.get_mut(idx) else {
+            return;
+        };
         if m.cmd_tx.is_some() {
             return;
         }
@@ -595,14 +620,23 @@ impl GuiApp {
             let (t2, mut r2) = tokio_mpsc::channel(64);
             let list = match PiClient::spawn(&base, t2, usize::MAX).await {
                 Ok(mut c) => {
-                    c.send(CmdKind::GetModels, json!({ "type": "get_available_models" }))
-                        .await;
+                    c.send(
+                        CmdKind::GetModels,
+                        json!({ "type": "get_available_models" }),
+                    )
+                    .await;
                     let mut out = Vec::new();
                     for _ in 0..1000 {
                         match tokio::time::timeout(std::time::Duration::from_secs(30), r2.recv())
                             .await
                         {
-                            Ok(Some((_, Rec::Cmd { kind: CmdKind::GetModels, resp }))) => {
+                            Ok(Some((
+                                _,
+                                Rec::Cmd {
+                                    kind: CmdKind::GetModels,
+                                    resp,
+                                },
+                            ))) => {
                                 if resp
                                     .get("success")
                                     .and_then(|v| v.as_bool())
@@ -734,10 +768,7 @@ impl GuiApp {
 impl eframe::App for GuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let changed = self.drain_records();
-        let any_running = self
-            .members
-            .iter()
-            .any(|m| m.phase == Phase::Running);
+        let any_running = self.members.iter().any(|m| m.phase == Phase::Running);
         let active_streaming = self
             .members
             .get(self.active)
@@ -873,10 +904,17 @@ impl GuiApp {
                     } else {
                         theme::PRESENCE_OFF
                     }
-                },
+                }
             },
         });
-        let (n, total) = (if self.members.is_empty() { 0 } else { self.active + 1 }, self.members.len());
+        let (n, total) = (
+            if self.members.is_empty() {
+                0
+            } else {
+                self.active + 1
+            },
+            self.members.len(),
+        );
         let (tok, cost) = self
             .members
             .get(self.active)
@@ -896,7 +934,11 @@ impl GuiApp {
                 ui.add_space(10.0);
                 ui.label(RichText::new(&d.sub).small().color(theme::DIM));
             } else {
-                ui.label(RichText::new("the family is empty").size(14.0).color(theme::DIM));
+                ui.label(
+                    RichText::new("the family is empty")
+                        .size(14.0)
+                        .color(theme::DIM),
+                );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(6.0);
@@ -927,7 +969,8 @@ impl GuiApp {
         });
         ui.add_space(12.0);
         for i in 0..self.members.len() {
-            let d = { // scoped immutable read
+            let d = {
+                // scoped immutable read
                 let m = &self.members[i];
                 RowData {
                     active: i == self.active,
@@ -951,7 +994,7 @@ impl GuiApp {
                             } else {
                                 theme::PRESENCE_OFF
                             }
-                        },
+                        }
                     },
                 }
             };
@@ -961,11 +1004,16 @@ impl GuiApp {
             ui.painter().rect_filled(
                 rect,
                 10.0,
-                if d.active { theme::HOVER } else { Color32::TRANSPARENT },
+                if d.active {
+                    theme::HOVER
+                } else {
+                    Color32::TRANSPARENT
+                },
             );
             // avatar disc, left of the row
             let av_c = egui::pos2(rect.min.x + 8.0 + 17.0, rect.center().y);
-            ui.painter().circle_filled(av_c, 17.0, theme::avatar_fill(d.color));
+            ui.painter()
+                .circle_filled(av_c, 17.0, theme::avatar_fill(d.color));
             ui.painter().text(
                 av_c,
                 egui::Align2::CENTER_CENTER,
@@ -974,7 +1022,8 @@ impl GuiApp {
                 d.color,
             );
             // presence dot, bottom-right of the disc
-            ui.painter().circle_filled(av_c + egui::vec2(12.0, 12.0), 5.0, d.dot);
+            ui.painter()
+                .circle_filled(av_c + egui::vec2(12.0, 12.0), 5.0, d.dot);
             // name + model caption
             let tx = rect.min.x + 8.0 + 34.0 + 10.0;
             ui.painter().text(
@@ -1059,30 +1108,33 @@ impl GuiApp {
                                     CmdKind::ClearQueue,
                                     json!({ "type": "clear_queue" }),
                                 );
-                                self.send_cmd(self.active, CmdKind::Abort, json!({ "type": "abort" }));
+                                self.send_cmd(
+                                    self.active,
+                                    CmdKind::Abort,
+                                    json!({ "type": "abort" }),
+                                );
                                 if let Some(m) = self.members.get_mut(self.active) {
                                     m.note("aborted · queued messages cleared");
                                 }
                             }
                             let enabled = !self.input.trim().is_empty();
-                            let send = egui::Frame::none()
-                                .fill(if enabled { theme::ACCENT } else { theme::BUBBLE })
-                                .rounding(egui::Rounding::same(14.0))
-                                .inner_margin(egui::Margin::same(0.0))
-                                .show(ui, |ui| {
-                                    ui.set_min_size(egui::vec2(30.0, 30.0));
-                                    ui.vertical_centered(|ui| {
-                                        ui.label(
-                                            RichText::new("➤")
-                                                .strong()
-                                                .color(if enabled {
-                                                    theme::BG
-                                                } else {
-                                                    theme::FAINT
-                                                }),
-                                        );
+                            let send =
+                                egui::Frame::none()
+                                    .fill(if enabled {
+                                        theme::ACCENT
+                                    } else {
+                                        theme::BUBBLE
+                                    })
+                                    .rounding(egui::Rounding::same(14.0))
+                                    .inner_margin(egui::Margin::same(0.0))
+                                    .show(ui, |ui| {
+                                        ui.set_min_size(egui::vec2(30.0, 30.0));
+                                        ui.vertical_centered(|ui| {
+                                            ui.label(RichText::new("➤").strong().color(
+                                                if enabled { theme::BG } else { theme::FAINT },
+                                            ));
+                                        });
                                     });
-                                });
                             if send.response.interact(egui::Sense::click()).clicked() {
                                 self.do_send();
                             }
@@ -1098,7 +1150,11 @@ impl GuiApp {
         if self.members.is_empty() {
             ui.centered_and_justified(|ui| {
                 ui.add_space(80.0);
-                ui.label(RichText::new("the family is empty").size(20.0).color(theme::DIM));
+                ui.label(
+                    RichText::new("the family is empty")
+                        .size(20.0)
+                        .color(theme::DIM),
+                );
                 ui.add_space(8.0);
                 ui.label(RichText::new("click “new member” to meet your first one").weak());
             });
@@ -1118,29 +1174,38 @@ impl GuiApp {
                         match item {
                             pi_milya::app::Item::User { text: t, at } => {
                                 ui.horizontal(|ui| {
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                                        egui::Frame::none()
-                                            .fill(theme::BUBBLE)
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Min),
+                                        |ui| {
+                                            egui::Frame::none()
+                                                .fill(theme::BUBBLE)
                                                 .rounding(egui::Rounding::same(14.0))
                                                 .inner_margin(egui::Margin::same(10.0))
                                                 .show(ui, |ui: &mut egui::Ui| {
                                                     ui.set_max_width(680.0);
-                                                    ui.label(RichText::new(t.clone()).color(theme::TEXT));
+                                                    ui.label(
+                                                        RichText::new(t.clone()).color(theme::TEXT),
+                                                    );
                                                     ui.horizontal(|ui| {
                                                         ui.with_layout(
-                                                            egui::Layout::right_to_left(egui::Align::Center),
+                                                            egui::Layout::right_to_left(
+                                                                egui::Align::Center,
+                                                            ),
                                                             |ui| {
                                                                 ui.label(
-                                                                    RichText::new(pi_milya::app::fmt_hm(*at))
-                                                                        .size(10.0)
-                                                                        .color(theme::FAINT),
+                                                                    RichText::new(
+                                                                        pi_milya::app::fmt_hm(*at),
+                                                                    )
+                                                                    .size(10.0)
+                                                                    .color(theme::FAINT),
                                                                 );
                                                             },
                                                         );
                                                     });
                                                 });
-                                        ui.add_space(44.0); // avatar gutter
-                                    });
+                                            ui.add_space(44.0); // avatar gutter
+                                        },
+                                    );
                                 });
                                 false
                             }
@@ -1148,13 +1213,16 @@ impl GuiApp {
                                 let mut clicked_think = false;
                                 ui.horizontal(|ui| {
                                     // avatar disc in a fixed gutter
-                                    let (arect, _) =
-                                        ui.allocate_exact_size(egui::vec2(44.0, 40.0), egui::Sense::hover());
-                                    let av_c = egui::pos2(
-                                        arect.min.x + 18.0,
-                                        arect.min.y + 20.0,
+                                    let (arect, _) = ui.allocate_exact_size(
+                                        egui::vec2(44.0, 40.0),
+                                        egui::Sense::hover(),
                                     );
-                                    ui.painter().circle_filled(av_c, 16.0, theme::avatar_fill(mcolor));
+                                    let av_c = egui::pos2(arect.min.x + 18.0, arect.min.y + 20.0);
+                                    ui.painter().circle_filled(
+                                        av_c,
+                                        16.0,
+                                        theme::avatar_fill(mcolor),
+                                    );
                                     ui.painter().text(
                                         av_c,
                                         egui::Align2::CENTER_CENTER,
@@ -1182,18 +1250,17 @@ impl GuiApp {
                                         ui.add_space(3.0);
                                         // Grok-style collapsible thinking line
                                         if !a.thinking.is_empty() {
-                                            let tl = ui.add(
-                                                egui::Label::new(
-                                                    RichText::new(format!(
-                                                        "{} · thinking · {} chars",
-                                                        if a.thinking_open { "▾" } else { "▸" },
-                                                        a.thinking.chars().count()
-                                                    ))
-                                                    .small()
-                                                    .color(theme::THINK),
-                                                ),
-                                            );
-                                            clicked_think = tl.interact(egui::Sense::click()).clicked();
+                                            let tl = ui.add(egui::Label::new(
+                                                RichText::new(format!(
+                                                    "{} · thinking · {} chars",
+                                                    if a.thinking_open { "▾" } else { "▸" },
+                                                    a.thinking.chars().count()
+                                                ))
+                                                .small()
+                                                .color(theme::THINK),
+                                            ));
+                                            clicked_think =
+                                                tl.interact(egui::Sense::click()).clicked();
                                             if a.thinking_open {
                                                 for tl2 in a.thinking.lines().take(120) {
                                                     ui.label(
@@ -1219,23 +1286,35 @@ impl GuiApp {
                                                 egui::vec2(tw, 34.0),
                                                 egui::Sense::hover(),
                                             );
-                                            ui.painter()
-                                                .rect_filled(trect, 8.0, Color32::from_rgb(22, 22, 25));
-                                            ui.painter()
-                                                .rect_stroke(trect, 8.0, egui::Stroke::new(1.0_f32, theme::BORDER));
+                                            ui.painter().rect_filled(
+                                                trect,
+                                                8.0,
+                                                Color32::from_rgb(22, 22, 25),
+                                            );
+                                            ui.painter().rect_stroke(
+                                                trect,
+                                                8.0,
+                                                egui::Stroke::new(1.0_f32, theme::BORDER),
+                                            );
                                             let ty = trect.center().y;
                                             ui.painter().text(
                                                 egui::pos2(trect.min.x + 10.0, ty),
                                                 egui::Align2::LEFT_CENTER,
                                                 status,
-                                                egui::FontId::new(12.0, egui::FontFamily::Proportional),
+                                                egui::FontId::new(
+                                                    12.0,
+                                                    egui::FontFamily::Proportional,
+                                                ),
                                                 c,
                                             );
                                             ui.painter().text(
                                                 egui::pos2(trect.min.x + 30.0, ty),
                                                 egui::Align2::LEFT_CENTER,
                                                 t.name.clone(),
-                                                egui::FontId::new(12.0, egui::FontFamily::Monospace),
+                                                egui::FontId::new(
+                                                    12.0,
+                                                    egui::FontFamily::Monospace,
+                                                ),
                                                 theme::DIM,
                                             );
                                             if let Some(d) = t.duration_ms {
@@ -1243,7 +1322,10 @@ impl GuiApp {
                                                     egui::pos2(trect.max.x - 10.0, ty),
                                                     egui::Align2::RIGHT_CENTER,
                                                     format!("{d} ms"),
-                                                    egui::FontId::new(10.0, egui::FontFamily::Proportional),
+                                                    egui::FontId::new(
+                                                        10.0,
+                                                        egui::FontFamily::Proportional,
+                                                    ),
                                                     theme::FAINT,
                                                 );
                                             }
@@ -1261,7 +1343,9 @@ impl GuiApp {
                             }
                             pi_milya::app::Item::Note(t) => {
                                 ui.horizontal_centered(|ui| {
-                                    ui.label(RichText::new(t.clone()).size(10.0).color(theme::FAINT));
+                                    ui.label(
+                                        RichText::new(t.clone()).size(10.0).color(theme::FAINT),
+                                    );
                                 });
                                 false
                             }
@@ -1328,7 +1412,9 @@ impl GuiApp {
                 if w.model_pending && w.model_list.is_empty() {
                     ui.label(RichText::new("fetching models from pi …").weak());
                 } else if w.model_list.is_empty() {
-                    ui.label(RichText::new("no models available — check llamesa").color(theme::ERR));
+                    ui.label(
+                        RichText::new("no models available — check llamesa").color(theme::ERR),
+                    );
                 } else {
                     let mut sel = w
                         .model
@@ -1349,12 +1435,7 @@ impl GuiApp {
                         });
                     w.model = w.model_list.get(sel).map(|x| x.0.clone());
                     if let Some(m) = w.model_list.get(sel) {
-                        ui.label(
-                            RichText::new(format!("id: {}", m.0))
-                                .small()
-                                .weak()
-                                .code(),
-                        );
+                        ui.label(RichText::new(format!("id: {}", m.0)).small().weak().code());
                     }
                 }
             });
@@ -1378,8 +1459,9 @@ impl GuiApp {
                 for (name, art) in FACE_PRESETS {
                     let face = art.join("\n");
                     let sel = w.face == face;
-                    let btn = egui::Button::new(RichText::new(format!("{face}\n{name}")).code().small())
-                        .selected(sel);
+                    let btn =
+                        egui::Button::new(RichText::new(format!("{face}\n{name}")).code().small())
+                            .selected(sel);
                     if ui.add(btn).clicked() {
                         w.face = face;
                     }
@@ -1400,7 +1482,8 @@ impl GuiApp {
             ui.horizontal(|ui| {
                 if ui.add(egui::Button::new("save member")).clicked() {
                     if w.model.as_deref().unwrap_or("").trim().is_empty() {
-                        w.save_err = "choose a model first — pi cannot start without one".to_string();
+                        w.save_err =
+                            "choose a model first — pi cannot start without one".to_string();
                     } else {
                         saved = true;
                     }

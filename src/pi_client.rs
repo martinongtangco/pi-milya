@@ -11,7 +11,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufWriter};
 use tokio::process::Child;
 use tokio::process::Command;
@@ -61,7 +61,10 @@ impl PiClient {
             .stderr(Stdio::piped())
             .current_dir(&cfg.cwd)
             .spawn()
-            .context(format!("failed to spawn {} (is it on PATH?)", cfg.pi_binary))?;
+            .context(format!(
+                "failed to spawn {} (is it on PATH?)",
+                cfg.pi_binary
+            ))?;
         let stdin = child.stdin.take().context("stdin pipe missing")?;
         let stdout = child.stdout.take().context("stdout pipe missing")?;
         let stderr = child.stderr.take().context("stderr pipe missing")?;
@@ -71,7 +74,7 @@ impl PiClient {
         let records_out = records.clone();
         let pending_out = pending.clone();
         tokio::spawn(async move {
-                let reader = tokio::io::BufReader::new(stdout);
+            let reader = tokio::io::BufReader::new(stdout);
             let mut lines = reader.lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 let line = line.trim();
@@ -82,10 +85,7 @@ impl PiClient {
                     continue;
                 };
                 let rec = if v.get("type").and_then(|t| t.as_str()) == Some("response") {
-                    let id = v
-                        .get("id")
-                        .and_then(|x| x.as_str())
-                        .map(|s| s.to_string());
+                    let id = v.get("id").and_then(|x| x.as_str()).map(|s| s.to_string());
                     let kind = match id {
                         Some(id) => {
                             let mut map = pending_out.lock().await;
@@ -141,13 +141,9 @@ impl PiClient {
                     match wr {
                         Ok(()) => match w.flush().await {
                             Ok(()) => true,
-                            Err(_e) => {
-                                false
-                            }
+                            Err(_e) => false,
                         },
-                        Err(_e) => {
-                            false
-                        }
+                        Err(_e) => false,
                     }
                 }
                 Err(_) => false,
@@ -191,13 +187,30 @@ fn uuid_v4() -> String {
         let mut mix = t ^ ((c as u128) << 64);
         for (i, byte) in b.iter_mut().enumerate() {
             *byte = ((mix >> ((i % 8) * 8)) & 0xff) as u8 ^ (i as u8).wrapping_mul(31);
-            mix = mix.wrapping_mul(6364136223847).wrapping_add(1442695040888963407);
+            mix = mix
+                .wrapping_mul(6364136223847)
+                .wrapping_add(1442695040888963407);
         }
     }
     b[6] = (b[6] & 0x0f) | 0x40;
     b[8] = (b[8] & 0x3f) | 0x80;
     format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]
+        b[0],
+        b[1],
+        b[2],
+        b[3],
+        b[4],
+        b[5],
+        b[6],
+        b[7],
+        b[8],
+        b[9],
+        b[10],
+        b[11],
+        b[12],
+        b[13],
+        b[14],
+        b[15]
     )
 }
