@@ -293,7 +293,7 @@ pub fn parse_event(v: &Value) -> PiEvent {
 
 /// Extract a compact summary of tool args (first string field, truncated).
 pub fn args_summary(args: &Value) -> String {
-    let s = match args {
+    match args {
         Value::Object(m) => {
             // common shapes: command (bash), path (read/write/edit), pattern (grep)
             for k in ["command", "path", "pattern", "query"] {
@@ -305,8 +305,7 @@ pub fn args_summary(args: &Value) -> String {
         }
         Value::Null => String::new(),
         other => other.to_string().chars().take(80).collect(),
-    };
-    s
+    }
 }
 
 /// Tolerant model list extraction from a get_available_models response.

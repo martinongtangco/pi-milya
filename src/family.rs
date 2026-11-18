@@ -68,7 +68,7 @@ impl Family {
         if self.members.is_empty() {
             self.active = 0;
         } else if self.active >= self.members.len() {
-            self.active = self.active % self.members.len();
+            self.active %= self.members.len();
         }
     }
 

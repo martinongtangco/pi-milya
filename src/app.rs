@@ -211,11 +211,10 @@ impl MemberState {
                         .get("sessionId")
                         .and_then(|x| x.as_str())
                         .map(|s| s.to_string())
+                        && Some(sid.clone()) != self.session_id
                     {
-                        if Some(sid.clone()) != self.session_id {
-                            self.session_id = Some(sid.clone());
-                            self.member.session_id = Some(sid);
-                        }
+                        self.session_id = Some(sid.clone());
+                        self.member.session_id = Some(sid);
                     }
                     self.items
                         .retain(|i| !matches!(i, Item::Note(n) if n.starts_with("…")));
@@ -634,10 +633,10 @@ impl App {
 
     fn open_wizard(&mut self, is_new: bool, editing_idx: Option<usize>) {
         let mut w = Wizard::new(is_new, editing_idx);
-        if let Some(idx) = editing_idx {
-            if let Some(m) = self.members.get(idx) {
-                w.prefill(&m.member);
-            }
+        if let Some(idx) = editing_idx
+            && let Some(m) = self.members.get(idx)
+        {
+            w.prefill(&m.member);
         }
         let cfg = self.cfg.clone();
         let (tx, rx) = mpsc::channel(1);
@@ -730,13 +729,12 @@ impl App {
 
     fn wizard_key(&mut self, key: KeyEvent) -> bool {
         let Some(w) = self.wizard.as_mut() else { return false };
-        if w.model_pending {
-            if let Some(rx) = self.model_list_rx.as_mut() {
-                if let Ok(list) = rx.try_recv() {
-                    w.model_list = list;
-                    w.model_pending = false;
-                }
-            }
+        if w.model_pending
+            && let Some(rx) = self.model_list_rx.as_mut()
+            && let Ok(list) = rx.try_recv()
+        {
+            w.model_list = list;
+            w.model_pending = false;
         }
         match w.step {
             WizStep::Name => match key.code {
@@ -956,11 +954,11 @@ impl App {
             Some(KeyAction::Enter) => self.do_enter().await,
             Some(KeyAction::Esc) => self.do_esc().await,
             Some(KeyAction::PickModel(id)) => {
-                if let Some(m) = self.active_mut() {
-                    if let Some(c) = m.client.as_mut() {
-                        c.send(CmdKind::SetModel, json!({ "type": "set_model", "model": id }))
-                            .await;
-                    }
+                if let Some(m) = self.active_mut()
+                    && let Some(c) = m.client.as_mut()
+                {
+                    c.send(CmdKind::SetModel, json!({ "type": "set_model", "model": id }))
+                        .await;
                 }
             }
             Some(KeyAction::NextMember) => {
@@ -1051,7 +1049,7 @@ impl App {
 
     fn is_known_slash(text: &str) -> bool {
         let head = text.split_whitespace().next().unwrap_or("");
-        SLASH_COMMANDS.iter().any(|c| head == *c)
+        SLASH_COMMANDS.contains(&head)
     }
 
     async fn dispatch_slash(&mut self, text: &str) {
@@ -1200,11 +1198,11 @@ impl App {
     fn toggle_last_thinking(&mut self) {
         let Some(m) = self.active_mut() else { return };
         for item in m.items.iter_mut().rev() {
-            if let Item::Asst(a) = item {
-                if !a.thinking.is_empty() {
-                    a.thinking_collapsed = !a.thinking_collapsed;
-                    return;
-                }
+            if let Item::Asst(a) = item
+                && !a.thinking.is_empty()
+            {
+                a.thinking_collapsed = !a.thinking_collapsed;
+                return;
             }
         }
     }
@@ -1274,13 +1272,12 @@ impl App {
     // ---------------- event loop ----------------
 
     pub async fn next(&mut self, key_rx: &mut mpsc::Receiver<KeyEvent>) -> Step {
-        if let Some(w) = self.wizard.as_mut().filter(|w| w.model_pending) {
-            if let Some(rx) = self.model_list_rx.as_mut() {
-                if let Ok(list) = rx.try_recv() {
-                    w.model_list = list;
-                    w.model_pending = false;
-                }
-            }
+        if let Some(w) = self.wizard.as_mut().filter(|w| w.model_pending)
+            && let Some(rx) = self.model_list_rx.as_mut()
+            && let Ok(list) = rx.try_recv()
+        {
+            w.model_list = list;
+            w.model_pending = false;
         }
         tokio::select! {
             k = key_rx.recv() => Step::Key(k.expect("key channel closed")),
@@ -1317,25 +1314,21 @@ impl App {
             }
             return;
         }
-        if let Rec::Cmd { kind: CmdKind::ClearQueue, resp } = &rec {
-            if resp
+        if let Rec::Cmd { kind: CmdKind::ClearQueue, resp } = &rec
+            && resp
                 .get("success")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false)
-            {
-                if let Some(texts) = resp
-                    .get("data")
-                    .and_then(|d| d.get("steering"))
-                    .and_then(|x| x.as_array())
-                {
-                    if let Some(first) = texts.first().and_then(|x| x.as_str()) {
-                        self.input = first.split('\n').map(str::to_string).collect();
-                        self.cursor_line = self.input.len().saturating_sub(1);
-                        if let Some(last) = self.input.last() {
-                            self.cursor_col = last.chars().count();
-                        }
-                    }
-                }
+            && let Some(texts) = resp
+                .get("data")
+                .and_then(|d| d.get("steering"))
+                .and_then(|x| x.as_array())
+            && let Some(first) = texts.first().and_then(|x| x.as_str())
+        {
+            self.input = first.split('\n').map(str::to_string).collect();
+            self.cursor_line = self.input.len().saturating_sub(1);
+            if let Some(last) = self.input.last() {
+                self.cursor_col = last.chars().count();
             }
         }
         if self.members.get(idx).is_none() {

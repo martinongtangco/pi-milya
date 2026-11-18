@@ -187,10 +187,10 @@ fn uuid_v4() -> String {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let _c = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut mix = t;
-        for i in 0..16 {
-            b[i] = ((mix >> ((i % 8) * 8)) & 0xff) as u8 ^ (i as u8).wrapping_mul(31);
+        let c = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut mix = t ^ ((c as u128) << 64);
+        for (i, byte) in b.iter_mut().enumerate() {
+            *byte = ((mix >> ((i % 8) * 8)) & 0xff) as u8 ^ (i as u8).wrapping_mul(31);
             mix = mix.wrapping_mul(6364136223847).wrapping_add(1442695040888963407);
         }
     }
