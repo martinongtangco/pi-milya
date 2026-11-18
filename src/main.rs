@@ -7,14 +7,16 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::event::{self, Event};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::execute;
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
 use pi_milya::app::App;
 use pi_milya::config::{self, parse_args};
 use pi_milya::pi_client::PiClient;
 use pi_milya::protocol::{AmEvent, CmdKind, PiEvent, Rec};
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use serde_json::json;
 use tokio::sync::mpsc;
 
@@ -41,7 +43,10 @@ async fn main() -> Result<()> {
     result
 }
 
-async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, cfg: &config::Config) -> Result<()> {
+async fn run(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    cfg: &config::Config,
+) -> Result<()> {
     let mut app = App::new(cfg.clone());
     app.start().await?;
     terminal.draw(|f| ui::draw(f, &app))?;
@@ -50,12 +55,11 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, cfg: &config
     // crossterm's poll is blocking: hop it off the async executor.
     tokio::spawn(async move {
         loop {
-            let polled =
-                tokio::task::spawn_blocking(|| event::poll(Duration::from_millis(250)))
-                    .await
-                    .ok()
-                    .and_then(|r| r.ok())
-                    .unwrap_or(false);
+            let polled = tokio::task::spawn_blocking(|| event::poll(Duration::from_millis(250)))
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .unwrap_or(false);
             if !polled {
                 continue;
             }
@@ -94,7 +98,9 @@ async fn smoke(cfg: &config::Config) -> Result<()> {
     let (rec_tx, mut rec_rx) = mpsc::channel(256);
     let mut client = PiClient::spawn(cfg, rec_tx, 0).await?;
     eprintln!("smoke: pi spawned");
-    client.send(CmdKind::GetState, json!({ "type": "get_state" })).await;
+    client
+        .send(CmdKind::GetState, json!({ "type": "get_state" }))
+        .await;
 
     let mut settled = false;
 
@@ -107,14 +113,25 @@ async fn smoke(cfg: &config::Config) -> Result<()> {
             None => anyhow::bail!("smoke: pi exited early"),
         };
         match rec {
-            Rec::Cmd { kind: CmdKind::GetState, resp } => {
-                let ok = resp.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+            Rec::Cmd {
+                kind: CmdKind::GetState,
+                resp,
+            } => {
+                let ok = resp
+                    .get("success")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 if !ok {
-                    anyhow::bail!("smoke: get_state failed: {}", resp.get("error").and_then(|v| v.as_str()).unwrap_or("?"));
+                    anyhow::bail!(
+                        "smoke: get_state failed: {}",
+                        resp.get("error").and_then(|v| v.as_str()).unwrap_or("?")
+                    );
                 }
-                let model = resp["data"]
-                    .get("model")
-                    .and_then(|m| m.get("name").or_else(|| m.get("id")).and_then(|x| x.as_str()));
+                let model = resp["data"].get("model").and_then(|m| {
+                    m.get("name")
+                        .or_else(|| m.get("id"))
+                        .and_then(|x| x.as_str())
+                });
                 eprintln!("smoke: state ok (model: {})", model.unwrap_or("default"));
                 // now send the prompt
                 client
@@ -127,11 +144,13 @@ async fn smoke(cfg: &config::Config) -> Result<()> {
             Rec::Cmd { .. } => {}
             Rec::Event(v) => {
                 let e = pi_milya::protocol::parse_event(&v);
-                if let PiEvent::MessageUpdate { ame, .. } = &e {
-                    if let AmEvent::TextDelta { delta, .. } = ame {
-                        print!("{delta}");
-                        io::stdout().flush().ok();
-                    }
+                if let PiEvent::MessageUpdate {
+                    ame: AmEvent::TextDelta { delta, .. },
+                    ..
+                } = &e
+                {
+                    print!("{delta}");
+                    io::stdout().flush().ok();
                 }
                 if matches!(e, PiEvent::AgentSettled { .. }) {
                     settled = true;

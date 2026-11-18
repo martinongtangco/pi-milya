@@ -29,10 +29,9 @@ impl Family {
         let dir = if cfg!(target_os = "windows") {
             // %APPDATA%\pi-milya is the native location; keep a legacy ~/.config
             // directory if it already holds a family.json (no forced migration).
-            let appdata = std::env::var_os("APPDATA")
-                .map(|a| PathBuf::from(a).join("pi-milya"));
-            let legacy = std::env::var_os("HOME")
-                .map(|h| PathBuf::from(h).join(".config").join("pi-milya"));
+            let appdata = std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("pi-milya"));
+            let legacy =
+                std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config").join("pi-milya"));
             match (appdata, legacy) {
                 (Some(_), Some(l)) if l.join("family.json").exists() => l,
                 (Some(a), _) => a,
@@ -68,7 +67,7 @@ impl Family {
         if self.members.is_empty() {
             self.active = 0;
         } else if self.active >= self.members.len() {
-            self.active = self.active % self.members.len();
+            self.active %= self.members.len();
         }
     }
 
@@ -77,19 +76,17 @@ impl Family {
     }
 }
 
-pub const THINKING_LEVELS: &[&str] = &[
-    "off", "minimal", "low", "medium", "high", "xhigh", "max",
-];
+pub const THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 pub const FACE_PRESETS: &[(&str, &[&str])] = &[
-    ("mama",  &["  _  ", "(o o)", " ^ ^ "]),
-    ("papa",  &[" |__|", "(o o)", " _||_ "]),
-    ("kuya",  &[" ^_^ ", "(o o)", " _ _ "]),
-    ("tita",  &[" __  ", "(>< )", " ^^  "]),
-    ("bot",   &[" [||]", "(o_o)", " [||] "]),
+    ("mama", &["  _  ", "(o o)", " ^ ^ "]),
+    ("papa", &[" |__|", "(o o)", " _||_ "]),
+    ("kuya", &[" ^_^ ", "(o o)", " _ _ "]),
+    ("tita", &[" __  ", "(>< )", " ^^  "]),
+    ("bot", &[" [||]", "(o_o)", " [||] "]),
     ("ghost", &[" .--.", "(oo o)", " ^  ^"]),
-    ("cat",   &[" /\\_/\\", "( o o )", " > ^ < "]),
-    ("lola",  &["  __  ", " (o o)", "  ||  "]),
+    ("cat", &[" /\\_/\\", "( o o )", " > ^ < "]),
+    ("lola", &["  __  ", " (o o)", "  ||  "]),
 ];
 
 pub fn face_of(preset: &[&str]) -> String {

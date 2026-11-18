@@ -23,7 +23,10 @@ pub enum Rec {
     /// A session event (or an uncorrelated response).
     Event(Value),
     /// A response to one of our commands.
-    Cmd { kind: CmdKind, resp: Value },
+    Cmd {
+        kind: CmdKind,
+        resp: Value,
+    },
     Stderr(String),
 }
 
@@ -81,7 +84,11 @@ pub fn parse_am_event(v: &Value) -> AmEvent {
         },
         "text_end" => AmEvent::TextEnd {
             ci,
-            content: v.get("content").and_then(|x| x.as_str()).unwrap_or("").into(),
+            content: v
+                .get("content")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .into(),
         },
         "thinking_delta" => AmEvent::ThinkingDelta {
             ci,
@@ -89,7 +96,11 @@ pub fn parse_am_event(v: &Value) -> AmEvent {
         },
         "thinking_end" => AmEvent::ThinkingEnd {
             ci,
-            content: v.get("content").and_then(|x| x.as_str()).unwrap_or("").into(),
+            content: v
+                .get("content")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .into(),
         },
         "toolcall_start" => AmEvent::ToolCallStart {
             ci,
@@ -109,7 +120,11 @@ pub fn parse_am_event(v: &Value) -> AmEvent {
                 .get("error")
                 .and_then(|x| x.as_str())
                 .map(|s| s.to_string())
-                .or_else(|| v.get("reason").and_then(|x| x.as_str()).map(|s| s.to_string()))
+                .or_else(|| {
+                    v.get("reason")
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.to_string())
+                })
                 .unwrap_or_else(|| "stream error".into()),
         },
         _ => AmEvent::Other,
@@ -149,22 +164,61 @@ pub fn tool_output(v: &Value) -> String {
 #[derive(Clone, Debug)]
 pub enum PiEvent {
     AgentStart,
-    AgentSettled { aborted: bool },
+    AgentSettled {
+        aborted: bool,
+    },
     TurnEnd,
-    MessageStart { role: String },
-    MessageUpdate { usage: Option<Usage>, ame: AmEvent },
+    MessageStart {
+        role: String,
+    },
+    MessageUpdate {
+        usage: Option<Usage>,
+        ame: AmEvent,
+    },
     MessageEnd,
-    ToolStart { id: String, name: String, args: Value },
-    ToolUpdate { id: String, partial: String },
-    ToolEnd { id: String, result: ToolResult },
-    QueueUpdate { steering: Vec<String>, follow_up: Vec<String> },
-    SessionNameChanged { name: Option<String> },
-    ThinkingLevelChanged { level: String },
-    CompactionStart { reason: String },
-    CompactionEnd { aborted: bool, error: Option<String>, tokens_after: Option<u64> },
-    AutoRetryStart { attempt: u32, max_attempts: u32, error: Option<String> },
-    AutoRetryEnd { success: bool, final_error: Option<String> },
-    ExtensionError { error: String },
+    ToolStart {
+        id: String,
+        name: String,
+        args: Value,
+    },
+    ToolUpdate {
+        id: String,
+        partial: String,
+    },
+    ToolEnd {
+        id: String,
+        result: ToolResult,
+    },
+    QueueUpdate {
+        steering: Vec<String>,
+        follow_up: Vec<String>,
+    },
+    SessionNameChanged {
+        name: Option<String>,
+    },
+    ThinkingLevelChanged {
+        level: String,
+    },
+    CompactionStart {
+        reason: String,
+    },
+    CompactionEnd {
+        aborted: bool,
+        error: Option<String>,
+        tokens_after: Option<u64>,
+    },
+    AutoRetryStart {
+        attempt: u32,
+        max_attempts: u32,
+        error: Option<String>,
+    },
+    AutoRetryEnd {
+        success: bool,
+        final_error: Option<String>,
+    },
+    ExtensionError {
+        error: String,
+    },
     Other(String),
 }
 
@@ -226,12 +280,20 @@ pub fn parse_event(v: &Value) -> PiEvent {
             steering: v
                 .get("steering")
                 .and_then(|x| x.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
                 .unwrap_or_default(),
             follow_up: v
                 .get("followUp")
                 .and_then(|x| x.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
                 .unwrap_or_default(),
         },
         "session_info_changed" => PiEvent::SessionNameChanged {
@@ -264,10 +326,7 @@ pub fn parse_event(v: &Value) -> PiEvent {
         },
         "auto_retry_start" => PiEvent::AutoRetryStart {
             attempt: v.get("attempt").and_then(|x| x.as_u64()).unwrap_or(1) as u32,
-            max_attempts: v
-                .get("maxAttempts")
-                .and_then(|x| x.as_u64())
-                .unwrap_or(1) as u32,
+            max_attempts: v.get("maxAttempts").and_then(|x| x.as_u64()).unwrap_or(1) as u32,
             error: v
                 .get("errorMessage")
                 .and_then(|x| x.as_str())
@@ -293,7 +352,7 @@ pub fn parse_event(v: &Value) -> PiEvent {
 
 /// Extract a compact summary of tool args (first string field, truncated).
 pub fn args_summary(args: &Value) -> String {
-    let s = match args {
+    match args {
         Value::Object(m) => {
             // common shapes: command (bash), path (read/write/edit), pattern (grep)
             for k in ["command", "path", "pattern", "query"] {
@@ -301,12 +360,14 @@ pub fn args_summary(args: &Value) -> String {
                     return s.chars().take(80).collect();
                 }
             }
-            m.keys().next().map(|k| format!("{k}: …")).unwrap_or_default()
+            m.keys()
+                .next()
+                .map(|k| format!("{k}: …"))
+                .unwrap_or_default()
         }
         Value::Null => String::new(),
         other => other.to_string().chars().take(80).collect(),
-    };
-    s
+    }
 }
 
 /// Tolerant model list extraction from a get_available_models response.

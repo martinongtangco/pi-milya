@@ -13,11 +13,9 @@ use serde_json::json;
 use tokio::sync::mpsc;
 
 use crate::config::Config;
-use crate::family::{Family, Member, FACE_PRESETS, THINKING_LEVELS};
+use crate::family::{FACE_PRESETS, Family, Member, THINKING_LEVELS};
 use crate::pi_client::PiClient;
-use crate::protocol::{
-    args_summary, extract_models, parse_event, AmEvent, CmdKind, PiEvent, Rec,
-};
+use crate::protocol::{AmEvent, CmdKind, PiEvent, Rec, args_summary, extract_models, parse_event};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
@@ -167,7 +165,10 @@ impl MemberState {
     }
 
     fn on_cmd_response(&mut self, kind: CmdKind, resp: &serde_json::Value) {
-        let ok = resp.get("success").and_then(|x| x.as_bool()).unwrap_or(false);
+        let ok = resp
+            .get("success")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
         let data = resp.get("data").cloned().unwrap_or(serde_json::Value::Null);
         let err = || {
             resp.get("error")
@@ -211,11 +212,10 @@ impl MemberState {
                         .get("sessionId")
                         .and_then(|x| x.as_str())
                         .map(|s| s.to_string())
+                        && Some(sid.clone()) != self.session_id
                     {
-                        if Some(sid.clone()) != self.session_id {
-                            self.session_id = Some(sid.clone());
-                            self.member.session_id = Some(sid);
-                        }
+                        self.session_id = Some(sid.clone());
+                        self.member.session_id = Some(sid);
                     }
                     self.items
                         .retain(|i| !matches!(i, Item::Note(n) if n.starts_with("…")));
@@ -304,10 +304,18 @@ impl MemberState {
                     self.cur_usage = Some(u);
                 }
                 match ame {
-                    AmEvent::TextDelta { delta, .. } => self.apply_to_last_asst(|a| a.text.push_str(&delta)),
-                    AmEvent::TextEnd { content, .. } => self.apply_to_last_asst(|a| a.text = content),
-                    AmEvent::ThinkingDelta { delta, .. } => self.apply_to_last_asst(|a| a.thinking.push_str(&delta)),
-                    AmEvent::ThinkingEnd { content, .. } => self.apply_to_last_asst(|a| a.thinking = content),
+                    AmEvent::TextDelta { delta, .. } => {
+                        self.apply_to_last_asst(|a| a.text.push_str(&delta))
+                    }
+                    AmEvent::TextEnd { content, .. } => {
+                        self.apply_to_last_asst(|a| a.text = content)
+                    }
+                    AmEvent::ThinkingDelta { delta, .. } => {
+                        self.apply_to_last_asst(|a| a.thinking.push_str(&delta))
+                    }
+                    AmEvent::ThinkingEnd { content, .. } => {
+                        self.apply_to_last_asst(|a| a.thinking = content)
+                    }
                     AmEvent::Error { msg } => self.error(msg),
                     AmEvent::ToolCallStart { .. } | AmEvent::Other => {}
                 }
@@ -356,7 +364,10 @@ impl MemberState {
                     }
                 });
             }
-            PiEvent::QueueUpdate { steering, follow_up } => {
+            PiEvent::QueueUpdate {
+                steering,
+                follow_up,
+            } => {
                 self.queue.steering = steering;
                 self.queue.follow_up = follow_up;
             }
@@ -365,7 +376,11 @@ impl MemberState {
                 self.note(format!("thinking level → {level}"));
             }
             PiEvent::CompactionStart { reason } => self.note(format!("compacting ({reason}) …")),
-            PiEvent::CompactionEnd { aborted, error, tokens_after } => {
+            PiEvent::CompactionEnd {
+                aborted,
+                error,
+                tokens_after,
+            } => {
                 if aborted {
                     self.note("compaction aborted");
                 } else if let Some(err) = error {
@@ -377,11 +392,18 @@ impl MemberState {
                     });
                 }
             }
-            PiEvent::AutoRetryStart { attempt, max_attempts, error } => self.note(format!(
+            PiEvent::AutoRetryStart {
+                attempt,
+                max_attempts,
+                error,
+            } => self.note(format!(
                 "retry {attempt}/{max_attempts}{}",
                 error.map(|e| format!(" ({e})")).unwrap_or_default()
             )),
-            PiEvent::AutoRetryEnd { success, final_error } => {
+            PiEvent::AutoRetryEnd {
+                success,
+                final_error,
+            } => {
                 if success {
                     self.note("retry succeeded");
                 } else if let Some(e) = final_error {
@@ -508,8 +530,13 @@ pub struct App {
 }
 
 pub enum MenuItem {
-    Slash { selected: usize },
-    Models { list: Vec<(String, String)>, selected: usize },
+    Slash {
+        selected: usize,
+    },
+    Models {
+        list: Vec<(String, String)>,
+        selected: usize,
+    },
     Help,
 }
 
@@ -521,7 +548,12 @@ impl App {
             active: 0,
         });
         family.clamp_active();
-        let members = family.members.iter().cloned().map(MemberState::new).collect();
+        let members = family
+            .members
+            .iter()
+            .cloned()
+            .map(MemberState::new)
+            .collect();
         Self {
             cfg,
             family,
@@ -587,11 +619,12 @@ impl App {
                 return;
             }
         };
-        spawn.send(CmdKind::GetState, json!({ "type": "get_state" })).await;
+        spawn
+            .send(CmdKind::GetState, json!({ "type": "get_state" }))
+            .await;
         self.members[idx].client = Some(spawn);
         self.members[idx].phase = Phase::Connecting;
-        self.members[idx]
-            .note(format!("… {} connecting", member.name));
+        self.members[idx].note(format!("… {} connecting", member.name));
     }
 
     /// (Re)start a member's client, e.g. after /edit changed its config.
@@ -634,10 +667,10 @@ impl App {
 
     fn open_wizard(&mut self, is_new: bool, editing_idx: Option<usize>) {
         let mut w = Wizard::new(is_new, editing_idx);
-        if let Some(idx) = editing_idx {
-            if let Some(m) = self.members.get(idx) {
-                w.prefill(&m.member);
-            }
+        if let Some(idx) = editing_idx
+            && let Some(m) = self.members.get(idx)
+        {
+            w.prefill(&m.member);
         }
         let cfg = self.cfg.clone();
         let (tx, rx) = mpsc::channel(1);
@@ -647,17 +680,23 @@ impl App {
             let (t2, mut r2) = mpsc::channel(64);
             let list = match PiClient::spawn(&cfg, t2, usize::MAX).await {
                 Ok(mut c) => {
-                    c.send(CmdKind::GetModels, json!({ "type": "get_available_models" }))
-                        .await;
+                    c.send(
+                        CmdKind::GetModels,
+                        json!({ "type": "get_available_models" }),
+                    )
+                    .await;
                     let mut out = Vec::new();
                     for _ in 0..1000 {
-                        match tokio::time::timeout(
-                            std::time::Duration::from_secs(30),
-                            r2.recv(),
-                        )
-                        .await
+                        match tokio::time::timeout(std::time::Duration::from_secs(30), r2.recv())
+                            .await
                         {
-                            Ok(Some((_, Rec::Cmd { kind: CmdKind::GetModels, resp }))) => {
+                            Ok(Some((
+                                _,
+                                Rec::Cmd {
+                                    kind: CmdKind::GetModels,
+                                    resp,
+                                },
+                            ))) => {
                                 if resp
                                     .get("success")
                                     .and_then(|v| v.as_bool())
@@ -692,14 +731,21 @@ impl App {
             .clone()
             .unwrap_or_else(|| FACE_PRESETS[0].1.join("\n"));
         let prompt = w.prompt.join("\n");
-        let prompt = if prompt.trim().is_empty() { None } else { Some(prompt) };
+        let prompt = if prompt.trim().is_empty() {
+            None
+        } else {
+            Some(prompt)
+        };
         match w.editing_idx {
             Some(idx) => {
                 if let Some(m) = self.members.get_mut(idx) {
                     m.member.name = w.name.clone();
                     m.member.face = face;
                     m.member.model = w.model.clone().unwrap_or_else(|| m.member.model.clone());
-                    m.member.thinking = w.thinking.clone().unwrap_or_else(|| m.member.thinking.clone());
+                    m.member.thinking = w
+                        .thinking
+                        .clone()
+                        .unwrap_or_else(|| m.member.thinking.clone());
                     m.member.system_prompt = prompt;
                     m.client = None;
                 }
@@ -729,14 +775,15 @@ impl App {
     }
 
     fn wizard_key(&mut self, key: KeyEvent) -> bool {
-        let Some(w) = self.wizard.as_mut() else { return false };
-        if w.model_pending {
-            if let Some(rx) = self.model_list_rx.as_mut() {
-                if let Ok(list) = rx.try_recv() {
-                    w.model_list = list;
-                    w.model_pending = false;
-                }
-            }
+        let Some(w) = self.wizard.as_mut() else {
+            return false;
+        };
+        if w.model_pending
+            && let Some(rx) = self.model_list_rx.as_mut()
+            && let Ok(list) = rx.try_recv()
+        {
+            w.model_list = list;
+            w.model_pending = false;
         }
         match w.step {
             WizStep::Name => match key.code {
@@ -787,11 +834,7 @@ impl App {
                             w.sel = w
                                 .thinking
                                 .as_ref()
-                                .and_then(|t| {
-                                    THINKING_LEVELS
-                                        .iter()
-                                        .position(|l| *l == t.as_str())
-                                })
+                                .and_then(|t| THINKING_LEVELS.iter().position(|l| *l == t.as_str()))
                                 .unwrap_or(3); // default: medium
                         }
                         true
@@ -819,9 +862,9 @@ impl App {
                     true
                 }
                 KeyCode::Esc => {
-                        w.step = WizStep::Model;
-                        true
-                    }
+                    w.step = WizStep::Model;
+                    true
+                }
                 _ => false,
             },
             WizStep::Face => match key.code {
@@ -895,7 +938,9 @@ impl App {
             KeyCode::Enter => self.pending_action = Some(KeyAction::Enter),
             KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => self.newline(),
             KeyCode::Esc => self.pending_action = Some(KeyAction::Esc),
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => self.exiting = true,
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.exiting = true
+            }
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if self.input.join("").is_empty() {
                     self.exiting = true;
@@ -956,11 +1001,14 @@ impl App {
             Some(KeyAction::Enter) => self.do_enter().await,
             Some(KeyAction::Esc) => self.do_esc().await,
             Some(KeyAction::PickModel(id)) => {
-                if let Some(m) = self.active_mut() {
-                    if let Some(c) = m.client.as_mut() {
-                        c.send(CmdKind::SetModel, json!({ "type": "set_model", "model": id }))
-                            .await;
-                    }
+                if let Some(m) = self.active_mut()
+                    && let Some(c) = m.client.as_mut()
+                {
+                    c.send(
+                        CmdKind::SetModel,
+                        json!({ "type": "set_model", "model": id }),
+                    )
+                    .await;
                 }
             }
             Some(KeyAction::NextMember) => {
@@ -1037,7 +1085,8 @@ impl App {
         if running {
             if let Some(m) = self.active_mut() {
                 if let Some(c) = m.client.as_mut() {
-                    c.send(CmdKind::ClearQueue, json!({ "type": "clear_queue" })).await;
+                    c.send(CmdKind::ClearQueue, json!({ "type": "clear_queue" }))
+                        .await;
                     c.send(CmdKind::Abort, json!({ "type": "abort" })).await;
                 }
                 m.note("aborted · queued messages cleared");
@@ -1051,7 +1100,7 @@ impl App {
 
     fn is_known_slash(text: &str) -> bool {
         let head = text.split_whitespace().next().unwrap_or("");
-        SLASH_COMMANDS.iter().any(|c| head == *c)
+        SLASH_COMMANDS.contains(&head)
     }
 
     async fn dispatch_slash(&mut self, text: &str) {
@@ -1067,28 +1116,41 @@ impl App {
             "/model" => {
                 if arg.is_empty() {
                     if let Some(c) = m.client.as_mut() {
-                        c.send(CmdKind::GetModels, json!({ "type": "get_available_models" }))
-                            .await;
+                        c.send(
+                            CmdKind::GetModels,
+                            json!({ "type": "get_available_models" }),
+                        )
+                        .await;
                     }
                 } else if let Some(c) = m.client.as_mut() {
-                    c.send(CmdKind::SetModel, json!({ "type": "set_model", "model": arg }))
-                        .await;
+                    c.send(
+                        CmdKind::SetModel,
+                        json!({ "type": "set_model", "model": arg }),
+                    )
+                    .await;
                 }
             }
             "/think" => {
                 if arg.is_empty() {
                     if let Some(c) = m.client.as_mut() {
-                        c.send(CmdKind::CycleThinking, json!({ "type": "cycle_thinking_level" }))
-                            .await;
+                        c.send(
+                            CmdKind::CycleThinking,
+                            json!({ "type": "cycle_thinking_level" }),
+                        )
+                        .await;
                     }
                 } else if let Some(c) = m.client.as_mut() {
-                    c.send(CmdKind::SetThinking, json!({ "type": "set_thinking_level", "level": arg }))
-                        .await;
+                    c.send(
+                        CmdKind::SetThinking,
+                        json!({ "type": "set_thinking_level", "level": arg }),
+                    )
+                    .await;
                 }
             }
             "/clear" => {
                 if let Some(c) = m.client.as_mut() {
-                    c.send(CmdKind::NewSession, json!({ "type": "new_session" })).await;
+                    c.send(CmdKind::NewSession, json!({ "type": "new_session" }))
+                        .await;
                 }
             }
             "/abort" => {
@@ -1103,11 +1165,16 @@ impl App {
             }
             "/stats" => {
                 if let Some(c) = m.client.as_mut() {
-                    c.send(CmdKind::Stats, json!({ "type": "get_session_stats" })).await;
+                    c.send(CmdKind::Stats, json!({ "type": "get_session_stats" }))
+                        .await;
                 }
             }
             _ => {
-                if self.active().map(|m| m.phase == Phase::Running).unwrap_or(false) {
+                if self
+                    .active()
+                    .map(|m| m.phase == Phase::Running)
+                    .unwrap_or(false)
+                {
                     self.send_to_active(text, true).await;
                 } else {
                     self.active_mut().unwrap().phase = Phase::Running;
@@ -1200,11 +1267,11 @@ impl App {
     fn toggle_last_thinking(&mut self) {
         let Some(m) = self.active_mut() else { return };
         for item in m.items.iter_mut().rev() {
-            if let Item::Asst(a) = item {
-                if !a.thinking.is_empty() {
-                    a.thinking_collapsed = !a.thinking_collapsed;
-                    return;
-                }
+            if let Item::Asst(a) = item
+                && !a.thinking.is_empty()
+            {
+                a.thinking_collapsed = !a.thinking_collapsed;
+                return;
             }
         }
     }
@@ -1266,7 +1333,9 @@ impl App {
                 }
                 _ => false,
             },
-            Some(MenuItem::Help) => matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')),
+            Some(MenuItem::Help) => {
+                matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q'))
+            }
             None => false,
         }
     }
@@ -1274,13 +1343,12 @@ impl App {
     // ---------------- event loop ----------------
 
     pub async fn next(&mut self, key_rx: &mut mpsc::Receiver<KeyEvent>) -> Step {
-        if let Some(w) = self.wizard.as_mut().filter(|w| w.model_pending) {
-            if let Some(rx) = self.model_list_rx.as_mut() {
-                if let Ok(list) = rx.try_recv() {
-                    w.model_list = list;
-                    w.model_pending = false;
-                }
-            }
+        if let Some(w) = self.wizard.as_mut().filter(|w| w.model_pending)
+            && let Some(rx) = self.model_list_rx.as_mut()
+            && let Ok(list) = rx.try_recv()
+        {
+            w.model_list = list;
+            w.model_pending = false;
         }
         tokio::select! {
             k = key_rx.recv() => Step::Key(k.expect("key channel closed")),
@@ -1292,13 +1360,17 @@ impl App {
     }
 
     pub fn on_record(&mut self, idx: usize, rec: Rec) {
-        if let Rec::Cmd { kind: CmdKind::GetModels, resp } = &rec {
-            let ok = resp.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+        if let Rec::Cmd {
+            kind: CmdKind::GetModels,
+            resp,
+        } = &rec
+        {
+            let ok = resp
+                .get("success")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             if ok {
-                let data = resp
-                    .get("data")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
+                let data = resp.get("data").cloned().unwrap_or(serde_json::Value::Null);
                 let list = extract_models(&data);
                 if list.is_empty() {
                     if let Some(m) = self.active_mut() {
@@ -1317,25 +1389,24 @@ impl App {
             }
             return;
         }
-        if let Rec::Cmd { kind: CmdKind::ClearQueue, resp } = &rec {
-            if resp
+        if let Rec::Cmd {
+            kind: CmdKind::ClearQueue,
+            resp,
+        } = &rec
+            && resp
                 .get("success")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false)
-            {
-                if let Some(texts) = resp
-                    .get("data")
-                    .and_then(|d| d.get("steering"))
-                    .and_then(|x| x.as_array())
-                {
-                    if let Some(first) = texts.first().and_then(|x| x.as_str()) {
-                        self.input = first.split('\n').map(str::to_string).collect();
-                        self.cursor_line = self.input.len().saturating_sub(1);
-                        if let Some(last) = self.input.last() {
-                            self.cursor_col = last.chars().count();
-                        }
-                    }
-                }
+            && let Some(texts) = resp
+                .get("data")
+                .and_then(|d| d.get("steering"))
+                .and_then(|x| x.as_array())
+            && let Some(first) = texts.first().and_then(|x| x.as_str())
+        {
+            self.input = first.split('\n').map(str::to_string).collect();
+            self.cursor_line = self.input.len().saturating_sub(1);
+            if let Some(last) = self.input.last() {
+                self.cursor_col = last.chars().count();
             }
         }
         if self.members.get(idx).is_none() {
